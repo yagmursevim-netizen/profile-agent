@@ -478,6 +478,18 @@ for (const testOrigin of [
       assert.equal(forcedResult.status, 'blocked');
       assert.equal(forcedResult.cachedCount, 0);
       assert.equal(forcedResult.rows.length, 0);
+      // Only meaningful while a scan is actually running and still reading
+      // sources — the seeded fixture job is 'completed', so this must be
+      // rejected rather than silently setting a flag nothing will consume.
+      assert.equal(
+        (
+          await post(
+            '/api/jobs/11111111-1111-4111-8111-111111111111/skip-discovery',
+            {},
+          )
+        ).status,
+        400,
+      );
     } finally {
       child.kill('SIGTERM');
       await new Promise((resolve) => {

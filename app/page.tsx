@@ -1343,6 +1343,25 @@ function Workspace({
                       </span>
                     )}
                     {running &&
+                      ['following', 'search'].includes(job.mode) &&
+                      job.sources.some(
+                        (s) => !(job.sourcesDone ?? []).includes(s),
+                      ) &&
+                      (user.role === 'admin' || job.ownerId === user.id) && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={job.status === 'stopping'}
+                          onClick={() =>
+                            execute('skip-discovery', async () => {
+                              await api(`/jobs/${job.id}/skip-discovery`, {});
+                            })
+                          }
+                        >
+                          Kaynak taramayı bitir, adaylara geç
+                        </Button>
+                      )}
+                    {running &&
                       (user.role === 'admin' || job.ownerId === user.id) && (
                         <Button
                           variant="ghost"

@@ -327,6 +327,10 @@ async function run(job, controller) {
     // and sourceLists, don't reset and re-read everything from scratch."
     const resuming = job.resumeRequested;
     job.resumeRequested = false;
+    // A "skip remaining discovery" request only applies to this run — reset
+    // it here so it doesn't silently skip discovery again on some later,
+    // unrelated resume of this same job.
+    job.skipRemainingDiscovery = false;
     if (!resuming) {
       job.cachedCount = 0;
       job.sourceLists = {};
@@ -404,9 +408,22 @@ async function run(job, controller) {
       return switched;
     };
     if (resuming) job.message = 'Kalan kullanıcılarla devam ediliyor…';
+    // Set via POST /api/jobs/:id/skip-discovery — moves straight to
+    // visiting whatever's already been found instead of reading every
+    // remaining source/term first. Sources not yet in sourcesDone stay
+    // that way, so a later "Devam et" can still pick them up.
+    const noteSkippedDiscovery = () => {
+      if (!job.skipRemainingDiscovery) return;
+      const skipped = job.sources.filter((s) => !sourcesDone.has(s));
+      if (skipped.length)
+        job.warnings.push(
+          `Kalan ${skipped.length} kaynak elle atlandı; o ana kadar bulunan adaylar işlenecek. Kalan kaynaklar "Devam et" ile sonra taranabilir.`,
+        );
+    };
     if (job.mode === 'search') {
       for (const term of job.sources) {
         if (sourcesDone.has(term)) continue;
+        if (job.skipRemainingDiscovery) break;
         signal.throwIfAborted();
         if (targets.size >= 5000) break;
         job.message = 'TikTok araması: ' + term;
@@ -426,9 +443,11 @@ async function run(job, controller) {
         await save();
         if (result.warning) job.warnings.push(term + ': ' + result.warning);
       }
+      noteSkippedDiscovery();
     } else if (job.mode === 'following') {
       for (const source of job.sources) {
         if (sourcesDone.has(source)) continue;
+        if (job.skipRemainingDiscovery) break;
         signal.throwIfAborted();
         if (targets.size >= 5000) {
           job.warnings.push(
@@ -644,6 +663,7 @@ async function run(job, controller) {
           job.sourcesDone = [...sourcesDone];
         }
       }
+      noteSkippedDiscovery();
     } else if (!resuming) {
       job.sources.forEach((s) => targets.add(s));
       addDiscovered(targets);
@@ -1983,7 +2003,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const match = route.match(
-      /^\/api\/jobs\/([a-f0-9-]+)(?:\/(stop|export|analyze|usernames|rescreen-excluded|restore-excluded|mark-verdict))?$/,
+      /^\/api\/jobs\/([a-f0-9-]+)(?:\/(stop|skip-discovery|export|analyze|usernames|rescreen-excluded|restore-excluded|mark-verdict))?$/,
     );
     if (match) {
       const job = jobs.find((j) => j.id === match[1]);
@@ -2018,6 +2038,26 @@ const server = http.createServer(async (req, res) => {
           return send(res, 403, {
             error: 'Yalnızca iş sahibi veya admin durdurabilir.',
           });
+        return send(res, 200, { ok: true });
+      }
+      // Skips the remaining not-yet-read sources for this run only (the
+      // flag is consumed at the top of the next run()) and moves straight
+      // to visiting whatever candidates the already-completed sources
+      // found — unlike stop, the job isn't cancelled and keeps going.
+      // Skipped sources aren't marked done, so a later "Devam et" can still
+      // read them.
+      if (req.method === 'POST' && match[2] === 'skip-discovery') {
+        if (user.role !== 'admin' && job.ownerId !== user.id)
+          return send(res, 403, {
+            error: 'Yalnızca iş sahibi veya admin bu işlemi yapabilir.',
+          });
+        if (
+          job.status !== 'running' ||
+          !['following', 'search'].includes(job.mode)
+        )
+          throw new Error('Bu tarama şu anda kaynak taramıyor.');
+        job.skipRemainingDiscovery = true;
+        await save();
         return send(res, 200, { ok: true });
       }
       if (req.method === 'POST' && match[2] === 'analyze') {
