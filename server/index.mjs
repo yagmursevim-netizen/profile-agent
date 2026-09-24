@@ -420,6 +420,18 @@ async function run(job, controller) {
           `Kalan ${skipped.length} kaynak elle atlandı; o ana kadar bulunan adaylar işlenecek. Kalan kaynaklar "Devam et" ile sonra taranabilir.`,
         );
     };
+    // Written after every source/term, not just once at the very end of
+    // discovery — otherwise a hard stop (or crash) partway through a
+    // multi-source scan throws out of the loop via signal.throwIfAborted()
+    // before ever reaching that final write, and every already-completed
+    // source's candidates (sourcesDone already has them, sourceLists too)
+    // are silently missing from remainingUsers — a later "Devam et" would
+    // only pick up the sources it hadn't read yet, never revisit what
+    // those finished sources found.
+    const persistTargets = () => {
+      job.remainingUsers = [...targets];
+      job.total = job.done + targets.size;
+    };
     if (job.mode === 'search') {
       for (const term of job.sources) {
         if (sourcesDone.has(term)) continue;
@@ -440,6 +452,7 @@ async function run(job, controller) {
         addDiscovered(targets);
         sourcesDone.add(term);
         job.sourcesDone = [...sourcesDone];
+        persistTargets();
         await save();
         if (result.warning) job.warnings.push(term + ': ' + result.warning);
       }
@@ -648,6 +661,7 @@ async function run(job, controller) {
             targets.add(u);
           }
           addDiscovered(targets);
+          persistTargets();
           await save();
           if (targets.size >= 5000 && job.sources.length > 1)
             job.warnings.push(
