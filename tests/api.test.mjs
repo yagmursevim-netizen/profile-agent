@@ -412,6 +412,36 @@ for (const testOrigin of [
         ).status,
         400,
       );
+      const parsed = await (
+        await post('/api/parse', { text: 'cacheduser uncacheduser' })
+      ).json();
+      assert.deepEqual(parsed.usernames, ['cacheduser', 'uncacheduser']);
+      assert.deepEqual(parsed.alreadyScanned, ['cacheduser']);
+      // forceRescan is restricted to this job's own sources — the bogus
+      // extra entry below must be silently dropped, not error out.
+      const forcedResponse = await post('/api/jobs', {
+        text: 'cacheduser',
+        mode: 'profiles',
+        limit: 1,
+        forceRescan: ['cacheduser', 'not-one-of-the-sources'],
+      });
+      assert.equal(forcedResponse.status, 201);
+      const forcedJob = await forcedResponse.json();
+      assert.deepEqual(forcedJob.forceRescan, ['cacheduser']);
+      let forcedResult;
+      for (let i = 0; i < 100; i++) {
+        forcedResult = await (await get(`/api/jobs/${forcedJob.id}`)).json();
+        if (!['queued', 'running', 'stopping'].includes(forcedResult.status))
+          break;
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      // No Instagram account is configured in this test, so bypassing the
+      // cache (forced) hits ensureLogin's fast failure instead of the cache
+      // hit every other 'cacheduser' job in this test gets — proving the
+      // cache really was skipped, not just that the job happened to fail.
+      assert.equal(forcedResult.status, 'blocked');
+      assert.equal(forcedResult.cachedCount, 0);
+      assert.equal(forcedResult.rows.length, 0);
     } finally {
       child.kill('SIGTERM');
       await new Promise((resolve) => {

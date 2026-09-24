@@ -455,6 +455,27 @@ function Workspace({
   };
   const start = () =>
     execute('start', async () => {
+      // Only 'profiles' mode has a bounded, human-typed handle list where
+      // this is practical — 'following'/'search' discover far too many
+      // candidates automatically to ask about each one individually.
+      let forceRescan: string[] = [];
+      if (mode === 'profiles') {
+        const check = await api<{
+          usernames: string[];
+          alreadyScanned: string[];
+        }>('/parse', {
+          text: tab === 'csv' ? csv : text,
+          csv: tab === 'csv',
+          platform,
+        });
+        if (
+          check.alreadyScanned.length &&
+          confirm(
+            `${check.alreadyScanned.length} kullanıcı adı daha önce başarıyla tarandı:\n${check.alreadyScanned.join(', ')}\n\nYine de tekrar taramak ister misiniz? (İptal = kayıtlı veriler kullanılır, tekrar ziyaret edilmez)`,
+          )
+        )
+          forceRescan = check.alreadyScanned;
+      }
       const j = await api<Job>('/jobs', {
         text: mode === 'search' ? keywords : tab === 'csv' ? csv : text,
         platform,
@@ -463,6 +484,7 @@ function Workspace({
         market,
         limit: Number(limit),
         model: null,
+        forceRescan,
       });
       setJob(j);
       setSelected(j.id);

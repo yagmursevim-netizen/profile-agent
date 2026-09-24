@@ -614,13 +614,16 @@ async function run(job, controller) {
         lastBreakAt = Date.now();
       }
       job.message = `@${handle} inceleniyor (${job.done + 1}/${job.total})`;
+      const forced = job.forceRescan?.includes(handle.toLowerCase());
       let row;
       try {
-        row = cachedProfile(
-          jobs.filter((j) => j.id !== job.id),
-          handle,
-          platform,
-        );
+        row = forced
+          ? null
+          : cachedProfile(
+              jobs.filter((j) => j.id !== job.id),
+              handle,
+              platform,
+            );
         if (row) job.cachedCount++;
         else if (job.candidates?.[handle.toLowerCase()]?.private === true) {
           row = {
@@ -1804,8 +1807,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && route === '/api/parse') {
       const b = await body(req);
+      const platform = platformName(b.platform);
+      const usernames = parseInput(b.text || '', !!b.csv, platform);
+      // Lets the client warn before re-scanning someone already read
+      // successfully in a past job (see 'profiles' mode's forceRescan
+      // prompt) — cachedProfile is exactly what run() itself would reuse,
+      // so this reflects real cache hits, not a separate notion of "seen".
       return send(res, 200, {
-        usernames: parseInput(b.text || '', !!b.csv, platformName(b.platform)),
+        usernames,
+        alreadyScanned: usernames.filter((u) =>
+          cachedProfile(jobs, u, platform),
+        ),
       });
     }
     if (req.method === 'POST' && route === '/api/jobs') {
@@ -1840,6 +1852,20 @@ const server = http.createServer(async (req, res) => {
       if (b.market !== undefined && !MARKETS.includes(b.market))
         throw new Error('Geçersiz hedef pazar.');
       const market = MARKETS.includes(b.market) ? b.market : 'tr';
+      // 'profiles' mode's pre-scan prompt (see /api/parse's alreadyScanned)
+      // lets the admin force a fresh visit instead of the usual cache reuse
+      // for specific handles they explicitly chose to re-scan. Restricted to
+      // this job's own sources — nothing outside what was actually submitted
+      // can be forced.
+      const forceRescan = Array.isArray(b.forceRescan)
+        ? [
+            ...new Set(
+              b.forceRescan
+                .filter((u) => typeof u === 'string')
+                .map((u) => u.toLowerCase()),
+            ),
+          ].filter((u) => orderedSources.includes(u))
+        : [];
       const until = Math.max(
         0,
         ...jobs
@@ -1860,6 +1886,7 @@ const server = http.createServer(async (req, res) => {
         platform,
         mode: b.mode,
         market,
+        forceRescan,
         limit,
         model: null,
         rows: [],
