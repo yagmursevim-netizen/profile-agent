@@ -345,6 +345,35 @@ async function run(job, controller) {
         ...new Set([...(job.discoveredUsers || []), ...users]),
       ];
     };
+    // Alternative to rest breaks: rather than pausing, periodically hand
+    // off to another configured account and keep going — no stop, so
+    // there's nothing to resume. Checked both between sources (below) and
+    // between profile visits (further down); redrawn after every switch so
+    // the interval is never a predictable fixed cadence. Deliberately NOT
+    // checked mid-hover inside a single source's following-list read —
+    // that's one uninterruptible browser operation with no resumable
+    // cursor, so switching partway would restart it from scratch instead
+    // of continuing.
+    const randomSwitchMinutes = () =>
+      candidateSettings.accountSwitchMinMinutes +
+      Math.random() *
+        (candidateSettings.accountSwitchMaxMinutes -
+          candidateSettings.accountSwitchMinMinutes);
+    let nextAccountSwitchAt =
+      platform === 'instagram' && candidateSettings.accountSwitchEnabled
+        ? Date.now() + randomSwitchMinutes() * 60_000
+        : Infinity;
+    const maybeRotateAccount = async () => {
+      if (
+        platform !== 'instagram' ||
+        !candidateSettings.accountSwitchEnabled ||
+        Date.now() < nextAccountSwitchAt
+      )
+        return null;
+      const switched = await instagram.accounts?.rotateNext();
+      nextAccountSwitchAt = Date.now() + randomSwitchMinutes() * 60_000;
+      return switched;
+    };
     if (resuming) job.message = 'Kalan kullanıcılarla devam ediliyor…';
     if (job.mode === 'search') {
       for (const term of job.sources) {
@@ -378,7 +407,10 @@ async function run(job, controller) {
           );
           break;
         }
-        job.message = `@${source} takip listesi açılıyor…`;
+        const rotatedTo = await maybeRotateAccount();
+        job.message = rotatedTo
+          ? `Rotasyon: @${rotatedTo.username} hesabına geçildi — @${source} takip listesi açılıyor…`
+          : `@${source} takip listesi açılıyor…`;
         await save();
         try {
           let result = cachedFollowing(
@@ -600,20 +632,6 @@ async function run(job, controller) {
     // clock for the next rest break starts here rather than being persisted
     // across runs.
     let lastBreakAt = Date.now();
-    // Alternative to rest breaks: rather than pausing, periodically hand
-    // off to another configured account and keep going with the very next
-    // candidate — no stop, so there's nothing to resume. Redrawn after
-    // every switch (and once here) so the interval is never a predictable
-    // fixed cadence.
-    const randomSwitchMinutes = () =>
-      candidateSettings.accountSwitchMinMinutes +
-      Math.random() *
-        (candidateSettings.accountSwitchMaxMinutes -
-          candidateSettings.accountSwitchMinMinutes);
-    let nextAccountSwitchAt =
-      platform === 'instagram' && candidateSettings.accountSwitchEnabled
-        ? Date.now() + randomSwitchMinutes() * 60_000
-        : Infinity;
     for (const handle of targets) {
       signal.throwIfAborted();
       if (
@@ -627,15 +645,7 @@ async function run(job, controller) {
         await delay(mins * 60_000, null, { signal });
         lastBreakAt = Date.now();
       }
-      let rotatedTo = null;
-      if (
-        platform === 'instagram' &&
-        candidateSettings.accountSwitchEnabled &&
-        Date.now() >= nextAccountSwitchAt
-      ) {
-        rotatedTo = await instagram.accounts?.rotateNext();
-        nextAccountSwitchAt = Date.now() + randomSwitchMinutes() * 60_000;
-      }
+      const rotatedTo = await maybeRotateAccount();
       job.message = rotatedTo
         ? `Rotasyon: @${rotatedTo.username} hesabına geçildi — @${handle} inceleniyor (${job.done + 1}/${job.total})`
         : `@${handle} inceleniyor (${job.done + 1}/${job.total})`;

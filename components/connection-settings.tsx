@@ -396,8 +396,13 @@ export function ConnectionSettings() {
       <p>
         Dinlenme molalarına alternatif: taramayı durdurmak yerine, belirli
         aralıklarla otomatik olarak tanımlı başka bir Instagram hesabına geçer
-        ve aynı adayla kaldığı yerden devam eder — bekleme olmaz. Yalnızca
-        Instagram taramalarında ve birden fazla hesap tanımlıysa çalışır.
+        ve kaldığı yerden devam eder — bekleme olmaz. Yalnızca Instagram
+        taramalarında ve birden fazla hesap tanımlıysa çalışır. Bir kaynağın
+        takip listesi taranırken (kaydırma/önizleme aşaması) araya girmez —
+        yalnızca kaynaklar arasında ve profil ziyaretleri arasında geçiş yapar;
+        tek bir kaynağın listesi Instagram’da her açılışta aynı sırada
+        gelmeyebileceğinden, o aşamayı yarıda kesip “kaldığı yerden” devam
+        ettirmek güvenilir değildir.
       </p>
       <label htmlFor="account-switch-enabled">
         <input
