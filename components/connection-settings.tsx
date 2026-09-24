@@ -23,6 +23,9 @@ export function ConnectionSettings() {
     restBreakEnabled: false,
     restBreakEveryMinutes: 60,
     restBreakDurationMinutes: 15,
+    accountSwitchEnabled: false,
+    accountSwitchMinMinutes: 20,
+    accountSwitchMaxMinutes: 40,
   });
   const [openaiKey, setOpenaiKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
@@ -388,6 +391,60 @@ export function ConnectionSettings() {
         Örn. 60 dakikada bir 15 dakika mola: tarama bir saat aktif çalışır,
         sonra 15 dakika durur, sonra otomatik devam eder. Mola sırasında
         “Durdur” yine anında çalışır.
+      </p>
+      <h3>Hesap rotasyonu</h3>
+      <p>
+        Dinlenme molalarına alternatif: taramayı durdurmak yerine, belirli
+        aralıklarla otomatik olarak tanımlı başka bir Instagram hesabına geçer
+        ve aynı adayla kaldığı yerden devam eder — bekleme olmaz. Yalnızca
+        Instagram taramalarında ve birden fazla hesap tanımlıysa çalışır.
+      </p>
+      <label htmlFor="account-switch-enabled">
+        <input
+          id="account-switch-enabled"
+          type="checkbox"
+          checked={config.accountSwitchEnabled}
+          onChange={(e) =>
+            setConfig({ ...config, accountSwitchEnabled: e.target.checked })
+          }
+        />{' '}
+        Hesap rotasyonu aktif
+      </label>
+      <label htmlFor="account-switch-min">En az kaç dakikada bir (dk)</label>
+      <Input
+        id="account-switch-min"
+        type="number"
+        min={1}
+        max={1440}
+        disabled={!config.accountSwitchEnabled}
+        value={config.accountSwitchMinMinutes}
+        onChange={(e) =>
+          setConfig({
+            ...config,
+            accountSwitchMinMinutes: Number(e.target.value) || 1,
+          })
+        }
+      />
+      <label htmlFor="account-switch-max">En çok kaç dakikada bir (dk)</label>
+      <Input
+        id="account-switch-max"
+        type="number"
+        min={1}
+        max={1440}
+        disabled={!config.accountSwitchEnabled}
+        value={config.accountSwitchMaxMinutes}
+        onChange={(e) =>
+          setConfig({
+            ...config,
+            accountSwitchMaxMinutes: Number(e.target.value) || 1,
+          })
+        }
+      />
+      <p className="field-hint">
+        Her seferinde bu iki sayı arasında rastgele bir süre seçilir (örn. 20-40
+        dk arası) — sabit bir aralık olmadığı için her taramada farklı
+        zamanlarda geçiş olur. Kullanılamayan (askıya alınmış, kısıtlı, devre
+        dışı) hesaplar rotasyona hiç girmez.
       </p>
       <p className="field-hint">
         Sunucu çökmesi veya Instagram/TikTok kısıtı oluştuğunda

@@ -600,6 +600,20 @@ async function run(job, controller) {
     // clock for the next rest break starts here rather than being persisted
     // across runs.
     let lastBreakAt = Date.now();
+    // Alternative to rest breaks: rather than pausing, periodically hand
+    // off to another configured account and keep going with the very next
+    // candidate — no stop, so there's nothing to resume. Redrawn after
+    // every switch (and once here) so the interval is never a predictable
+    // fixed cadence.
+    const randomSwitchMinutes = () =>
+      candidateSettings.accountSwitchMinMinutes +
+      Math.random() *
+        (candidateSettings.accountSwitchMaxMinutes -
+          candidateSettings.accountSwitchMinMinutes);
+    let nextAccountSwitchAt =
+      platform === 'instagram' && candidateSettings.accountSwitchEnabled
+        ? Date.now() + randomSwitchMinutes() * 60_000
+        : Infinity;
     for (const handle of targets) {
       signal.throwIfAborted();
       if (
@@ -613,7 +627,18 @@ async function run(job, controller) {
         await delay(mins * 60_000, null, { signal });
         lastBreakAt = Date.now();
       }
-      job.message = `@${handle} inceleniyor (${job.done + 1}/${job.total})`;
+      let rotatedTo = null;
+      if (
+        platform === 'instagram' &&
+        candidateSettings.accountSwitchEnabled &&
+        Date.now() >= nextAccountSwitchAt
+      ) {
+        rotatedTo = await instagram.accounts?.rotateNext();
+        nextAccountSwitchAt = Date.now() + randomSwitchMinutes() * 60_000;
+      }
+      job.message = rotatedTo
+        ? `Rotasyon: @${rotatedTo.username} hesabına geçildi — @${handle} inceleniyor (${job.done + 1}/${job.total})`
+        : `@${handle} inceleniyor (${job.done + 1}/${job.total})`;
       const forced = job.forceRescan?.includes(handle.toLowerCase());
       let row;
       try {

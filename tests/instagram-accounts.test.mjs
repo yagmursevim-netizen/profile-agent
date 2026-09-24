@@ -101,6 +101,38 @@ void test('a temporary restriction switches to the next available account and ex
     await rm(dir, { recursive: true, force: true });
   }
 });
+void test('rotateNext cycles through every eligible account in order, skips unusable ones, and is a no-op with nowhere to rotate to', async () => {
+  const dir = await mkdtemp(tmpdir() + '/ig-accounts-');
+  try {
+    const store = await new InstagramAccounts(dir).init();
+    await store.update({ username: 'first', password: 'secret-first' });
+    await store.update({ username: 'second', password: 'secret-second' });
+    await store.update({ username: 'third', password: 'secret-third' });
+    const third = store.state.accounts.find((a) => a.username === 'third');
+    third.status = 'suspended'; // unusable — rotation must skip it
+    store.state.activeId = store.state.accounts[0].id;
+    const first = await store.rotateNext();
+    assert.equal(first.username, 'second');
+    assert.equal(store.current().username, 'second');
+    // 'third' is suspended, so this wraps all the way back to 'first'
+    // instead of stopping at the next account in array order.
+    const second = await store.rotateNext();
+    assert.equal(second.username, 'first');
+    assert.equal(
+      store.state.events[0].message,
+      'Periyodik rotasyon ile sonraki hesaba geçildi.',
+    );
+    // Only one usable account left (current excluded, third suspended) —
+    // rotating away from it has nowhere to go.
+    const secondAcc = store.state.accounts.find((a) => a.username === 'second');
+    secondAcc.enabled = false;
+    const stuck = await store.rotateNext();
+    assert.equal(stuck, null);
+    assert.equal(store.current().username, 'first');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 void test('suspension text in target bio never triggers account rotation; actual suspension screen does', async () => {
   const ig = new Instagram();
   const page = (url) => ({

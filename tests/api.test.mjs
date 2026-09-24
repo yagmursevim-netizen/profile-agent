@@ -254,6 +254,25 @@ for (const testOrigin of [
           .status,
         400,
       );
+      const rotation = await (
+        await post('/api/settings', {
+          accountSwitchEnabled: true,
+          accountSwitchMinMinutes: 20,
+          accountSwitchMaxMinutes: 40,
+        })
+      ).json();
+      assert.equal(rotation.accountSwitchEnabled, true);
+      assert.equal(rotation.accountSwitchMinMinutes, 20);
+      assert.equal(rotation.accountSwitchMaxMinutes, 40);
+      assert.equal(
+        (
+          await post('/api/settings', {
+            accountSwitchMinMinutes: 50,
+            accountSwitchMaxMinutes: 40,
+          })
+        ).status,
+        400,
+      );
       assert.equal(
         (await post('/api/tiktok/bridge/poll', { clientId: 'none' })).status,
         401,

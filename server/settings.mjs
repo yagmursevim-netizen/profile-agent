@@ -54,6 +54,15 @@ export function settings() {
     restBreakEnabled: saved.restBreakEnabled ?? false,
     restBreakEveryMinutes: saved.restBreakEveryMinutes ?? 60,
     restBreakDurationMinutes: saved.restBreakDurationMinutes ?? 15,
+    // Alternative to rest breaks: instead of pausing, periodically hand the
+    // scan off to another configured Instagram account (see
+    // InstagramAccounts.rotateNext() and its use in index.mjs's run()) so
+    // activity is spread across identities rather than one account running
+    // continuously. The interval is randomized between min/max and redrawn
+    // every time, so it's never a predictable fixed cadence.
+    accountSwitchEnabled: saved.accountSwitchEnabled ?? false,
+    accountSwitchMinMinutes: saved.accountSwitchMinMinutes ?? 20,
+    accountSwitchMaxMinutes: saved.accountSwitchMaxMinutes ?? 40,
   };
 }
 export function publicSettings() {
@@ -76,6 +85,9 @@ export function publicSettings() {
     restBreakEnabled: s.restBreakEnabled,
     restBreakEveryMinutes: s.restBreakEveryMinutes,
     restBreakDurationMinutes: s.restBreakDurationMinutes,
+    accountSwitchEnabled: s.accountSwitchEnabled,
+    accountSwitchMinMinutes: s.accountSwitchMinMinutes,
+    accountSwitchMaxMinutes: s.accountSwitchMaxMinutes,
   };
 }
 export async function updateSettings(input) {
@@ -184,6 +196,24 @@ export async function updateSettings(input) {
       throw new Error('Mola süresi 1-720 dakika arasında olmalı.');
     next.restBreakDurationMinutes = n;
   }
+  if (typeof input.accountSwitchEnabled !== 'undefined')
+    next.accountSwitchEnabled = !!input.accountSwitchEnabled;
+  if (typeof input.accountSwitchMinMinutes !== 'undefined') {
+    const n = Number(input.accountSwitchMinMinutes);
+    if (!Number.isInteger(n) || n < 1 || n > 1440)
+      throw new Error('Rotasyon alt sınırı 1-1440 dakika arasında olmalı.');
+    next.accountSwitchMinMinutes = n;
+  }
+  if (typeof input.accountSwitchMaxMinutes !== 'undefined') {
+    const n = Number(input.accountSwitchMaxMinutes);
+    if (!Number.isInteger(n) || n < 1 || n > 1440)
+      throw new Error('Rotasyon üst sınırı 1-1440 dakika arasında olmalı.');
+    next.accountSwitchMaxMinutes = n;
+  }
+  if (
+    (next.accountSwitchMinMinutes ?? 20) > (next.accountSwitchMaxMinutes ?? 40)
+  )
+    throw new Error('Rotasyon alt sınırı üst sınırdan büyük olamaz.');
   queue = queue
     .catch(() => {})
     .then(async () => {

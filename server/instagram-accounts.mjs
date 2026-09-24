@@ -346,4 +346,45 @@ export class InstagramAccounts {
     await this.save();
     return next;
   }
+  // Unlike nextAvailable(excludeId) — which just returns the first eligible
+  // account, fine for a one-off failover — this walks the roster in a
+  // circle starting just after the current account, so periodic rotation
+  // (see accountSwitchEnabled in run()) actually cycles through every
+  // configured account over time instead of only ever ping-ponging between
+  // the first two.
+  rotateCandidate() {
+    const accounts = this.state.accounts;
+    if (!accounts.length) return null;
+    const currentIndex = accounts.findIndex(
+      (a) => a.id === this.state.activeId,
+    );
+    for (let step = 1; step <= accounts.length; step++) {
+      const candidate = accounts[(currentIndex + step) % accounts.length];
+      if (
+        candidate.id !== this.state.activeId &&
+        candidate.enabled &&
+        candidate.status !== 'suspended' &&
+        !(candidate.restrictedUntil > Date.now()) &&
+        !this.quotaReached(candidate)
+      )
+        return candidate;
+    }
+    return null;
+  }
+  // No error involved — just periodic rotation to spread activity across
+  // accounts instead of one account running continuously. Silently does
+  // nothing if there's nowhere else to rotate to (0 or 1 usable accounts).
+  async rotateNext() {
+    const next = this.rotateCandidate();
+    if (!next) return null;
+    this.state.activeId = next.id;
+    this.state.events.unshift({
+      at: new Date().toISOString(),
+      username: next.username,
+      message: 'Periyodik rotasyon ile sonraki hesaba geçildi.',
+    });
+    this.state.events = this.state.events.slice(0, 100);
+    await this.save();
+    return next;
+  }
 }
