@@ -9,6 +9,7 @@ import {
   emails,
   parseAbbreviatedCount,
   followingCounts,
+  candidateInfoFromCsv,
   sortSourcesByFollowing,
   excludedUsernameSet,
 } from '../server/domain.mjs';
@@ -128,7 +129,7 @@ void test('parseAbbreviatedCount reads exact, comma and K/M/B follower counts fr
 void test('followingCounts reads an optional CSV column, tolerates thousand separators, and stays empty without it', () => {
   assert.deepEqual(
     followingCounts(
-      'username,following\nbirinci,1.234\nikinci,"2,500"\nüçüncü,',
+      'username,following\nbirinci,1.234\nikinci,"2,500"\nucuncu,',
     ),
     { birinci: 1234, ikinci: 2500 },
   );
@@ -138,6 +139,23 @@ void test('followingCounts reads an optional CSV column, tolerates thousand sepa
   assert.deepEqual(followingCounts('birinci\nikinci'), {});
   assert.deepEqual(followingCounts(''), {});
   assert.deepEqual(followingCounts('not,a\nvalid csv "'), {});
+});
+void test('candidateInfoFromCsv reads optional followers/fullname/private columns, requires at least one, and skips unparseable rows', () => {
+  assert.deepEqual(
+    candidateInfoFromCsv(
+      'username,followers,fullname,private\n' +
+        'birinci,"1,234",Birinci Kişi,true\n' +
+        'ikinci,,,false\n' +
+        'not a real handle!!,999,X,true',
+    ),
+    {
+      birinci: { followers: 1234, fullName: 'Birinci Kişi', private: true },
+      ikinci: { private: false },
+    },
+  );
+  // Username column only, no recognized enrichment columns at all.
+  assert.deepEqual(candidateInfoFromCsv('username\nbirinci'), {});
+  assert.deepEqual(candidateInfoFromCsv(''), {});
 });
 void test('sortSourcesByFollowing orders known counts ascending, keeps unknowns in place, and no-ops with no counts at all', () => {
   assert.deepEqual(

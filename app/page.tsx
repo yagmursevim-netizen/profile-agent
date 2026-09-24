@@ -501,11 +501,12 @@ function Workspace({
   };
   const start = () =>
     execute('start', async () => {
-      // Only 'profiles' mode has a bounded, human-typed handle list where
-      // this is practical — 'following'/'search' discover far too many
-      // candidates automatically to ask about each one individually.
+      // Only 'profiles'/'candidates' modes have a bounded, directly-entered
+      // handle list where this is practical — 'following'/'search' discover
+      // far too many candidates automatically to ask about each one
+      // individually.
       let forceRescan: string[] = [];
-      if (mode === 'profiles') {
+      if (['profiles', 'candidates'].includes(mode)) {
         const check = await api<{
           usernames: string[];
           alreadyScanned: string[];
@@ -513,6 +514,7 @@ function Workspace({
           text: tab === 'csv' ? csv : text,
           csv: tab === 'csv',
           platform,
+          mode,
         });
         if (
           check.alreadyScanned.length &&
@@ -560,7 +562,7 @@ function Workspace({
     try {
       if (file.size > 2_000_000) throw new Error('CSV en fazla 2 MB olabilir.');
       const content = await file.text();
-      await api('/parse', { text: content, csv: true, platform });
+      await api('/parse', { text: content, csv: true, platform, mode });
       setCsv(content);
       setFilename(file.name);
     } catch (e) {
@@ -930,6 +932,16 @@ function Workspace({
                           yoksa sıralama değişmez.
                         </p>
                       )}
+                      {mode === 'candidates' && (
+                        <p className="field-hint">
+                          İsteğe bağlı “followers”, “fullname”, “private”
+                          sütunları eklerseniz (bir taramanın “Kullanıcı adları
+                          CSV” çıktısı bu şekilde gelir), takip listesi hiç
+                          okunmadan aynı ünlü/kilitli/unvan/min-takipçi eleme
+                          kuralları uygulanır. Sütunlar yoksa o hesap normal
+                          ziyaret edilir.
+                        </p>
+                      )}
                     </TabsContent>
                   </Tabs>
                 )}
@@ -955,6 +967,10 @@ function Workspace({
                                 value: 'profiles',
                                 label: 'Girilen hesapları doğrudan incele',
                               },
+                              {
+                                value: 'candidates',
+                                label: 'Aday listesini ön elemeyle incele',
+                              },
                             ]
                           : [
                               {
@@ -964,6 +980,10 @@ function Workspace({
                               {
                                 value: 'profiles',
                                 label: 'Girilen hesapları doğrudan incele',
+                              },
+                              {
+                                value: 'candidates',
+                                label: 'Aday listesini ön elemeyle incele',
                               },
                             ]
                       }
@@ -1006,7 +1026,7 @@ function Workspace({
                       min={1}
                       max={5000}
                       value={limit}
-                      disabled={mode === 'profiles'}
+                      disabled={['profiles', 'candidates'].includes(mode)}
                       onChange={(e) => setLimit(e.target.value)}
                     />
                   </div>

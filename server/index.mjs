@@ -49,6 +49,7 @@ import {
   followingCounts,
   sortSourcesByFollowing,
   excludedUsernameSet,
+  candidateInfoFromCsv,
 } from './domain.mjs';
 
 // Playwright's own internal IPC to the browser process (pipeTransport.js)
@@ -282,6 +283,141 @@ async function body(req) {
   }
   return JSON.parse(Buffer.concat(chunks).toString() || '{}');
 }
+// Applies the same pre-visit filters 'following' mode uses per source
+// (excluded-list, previously-rejected, title-prefix, private, fame/
+// min-follower) plus the AI photo pre-screen, then adds survivors into
+// `targets` — shared between 'following' mode's per-source processing and
+// 'candidates' mode (a directly-submitted list, optionally pre-enriched
+// with the same followers/fullname/private data a following-list read
+// would have collected — see candidateInfoFromCsv in domain.mjs).
+async function screenAndAddCandidates({
+  users,
+  job,
+  jobsList,
+  platform,
+  candidateSettings,
+  targets,
+  recordExcluded,
+  signal,
+  save,
+  progressLabel,
+}) {
+  const aiConfig = candidateSettings;
+  const screenByPhoto = platform === 'instagram' && aiConfig.openaiKey;
+  const titlePrefix = titlePrefixFilterFor(job, aiConfig);
+  const rejected = rejectedUsernames(jobsList, platform);
+  const excludedUsernames = excludedUsernameSet(aiConfig.excludedUsernames);
+  const pending = [];
+  for (const u of users) {
+    if (targets.size + pending.length >= 5000) break;
+    const info = job.candidates?.[u.toLowerCase()];
+    if (excludedUsernames.has(u.toLowerCase())) {
+      recordExcluded(
+        u,
+        info,
+        'Hariç tutulacak kullanıcılar listesinde.',
+        'excluded-list',
+      );
+      continue;
+    }
+    if (rejected.has(u.toLowerCase())) {
+      recordExcluded(
+        u,
+        info,
+        'Daha önce "Uygun değil" olarak işaretlenmiş.',
+        'previously-rejected',
+      );
+      continue;
+    }
+    if (titlePrefix.test(info?.fullName || '')) {
+      recordExcluded(u, info, 'Unvan öneki nedeniyle elendi.', 'title');
+      continue;
+    }
+    if (info?.private === true) {
+      recordExcluded(u, info, 'Kilitli (gizli) hesap.', 'private');
+      continue;
+    }
+    if (typeof info?.followers === 'number') {
+      if (info.followers > aiConfig.fameFollowerThreshold) {
+        recordExcluded(
+          u,
+          info,
+          `${aiConfig.fameFollowerThreshold.toLocaleString('tr-TR')}+ takipçili (ünlü olarak değerlendirildi).`,
+          'fame',
+        );
+        continue;
+      }
+      if (info.followers < aiConfig.minFollowerThreshold) {
+        recordExcluded(
+          u,
+          info,
+          `${aiConfig.minFollowerThreshold.toLocaleString('tr-TR')} takipçi altında (minimum eşiğin altında).`,
+          'min',
+        );
+        continue;
+      }
+    }
+    pending.push({ u, info });
+  }
+  // AI screening never touches Instagram (only OpenAI), so running several
+  // at once is free of the pacing/detection concerns that keep profile
+  // visits sequential — just a handful in flight.
+  const excluded = new Map();
+  if (screenByPhoto && pending.length) {
+    let done = 0;
+    const concurrency = Math.min(6, pending.length);
+    const next = pending.values();
+    const worker = async () => {
+      for (const { u, info } of next) {
+        signal.throwIfAborted();
+        for (let attempt = 0; ; attempt++) {
+          try {
+            const screen = await screenPhoto(
+              info?.fullName,
+              info?.photoUrl || info?.photos?.[0],
+              aiConfig,
+              signal,
+            );
+            if (screen.isPerson === false)
+              excluded.set(u, {
+                reason: 'Fotoğrafta gerçek bir kişi tespit edilemedi (AI).',
+                source: 'ai-person',
+              });
+            else if (
+              aiConfig.genderExclude !== 'kapalı' &&
+              screen.genderGuess === aiConfig.genderExclude
+            )
+              excluded.set(u, {
+                reason: `Cinsiyet tahmini "${aiConfig.genderExclude}" ile eşleşti (AI, kesin değil).`,
+                source: 'ai-gender',
+              });
+            break;
+          } catch (e) {
+            if (signal.aborted) throw e;
+            if (e.status === 429 && attempt < 3) {
+              await delay(1000 * 2 ** attempt, null, { signal });
+              continue;
+            }
+            break;
+          }
+        }
+        done++;
+        job.message = `${progressLabel}: adaylar taranıyor (${done}/${pending.length})…`;
+        await save();
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  }
+  for (const { u, info } of pending) {
+    const entry = excluded.get(u);
+    if (entry) {
+      recordExcluded(u, info, entry.reason, entry.source);
+      continue;
+    }
+    if (targets.size >= 5000) break;
+    targets.add(u);
+  }
+}
 async function run(job, controller) {
   const signal = controller.signal;
   const platform = job.platform || 'instagram';
@@ -514,152 +650,18 @@ async function run(job, controller) {
           }
           job.sourceLists[source] = { ...result, requestedLimit: job.limit };
           job.candidates = { ...job.candidates, ...result.candidates };
-          // The scan's own AI assessment (job.model) is a separate, manually
-          // triggered step run after scanning; it's unset during a live scan.
-          // This pre-screen instead checks the app-wide OpenAI connection
-          // configured in Bağlantılar, independent of that later step.
-          const aiConfig = candidateSettings;
-          const screenByPhoto = platform === 'instagram' && aiConfig.openaiKey;
-          const titlePrefix = titlePrefixFilterFor(job, aiConfig);
-          // Cheap, synchronous filters first (free, no network at all).
-          // rejected: usernames the user (or AI) already marked "Uygun
-          // değil" in any earlier job — recomputed per source so a
-          // rejection made earlier in this same multi-source scan counts
-          // too, not just past jobs.
-          const rejected = rejectedUsernames(jobs, platform);
-          const excludedUsernames = excludedUsernameSet(
-            aiConfig.excludedUsernames,
-          );
-          const pending = [];
-          for (const u of result.users) {
-            if (targets.size + pending.length >= 5000) break;
-            const info = job.candidates?.[u.toLowerCase()];
-            if (excludedUsernames.has(u.toLowerCase())) {
-              recordExcluded(
-                u,
-                info,
-                'Hariç tutulacak kullanıcılar listesinde.',
-                'excluded-list',
-              );
-              continue;
-            }
-            if (rejected.has(u.toLowerCase())) {
-              recordExcluded(
-                u,
-                info,
-                'Daha önce "Uygun değil" olarak işaretlenmiş.',
-                'previously-rejected',
-              );
-              continue;
-            }
-            if (titlePrefix.test(info?.fullName || '')) {
-              recordExcluded(u, info, 'Unvan öneki nedeniyle elendi.', 'title');
-              continue;
-            }
-            // Gizli hesaplar takip listesinden anlaşılıyor; hiç ziyaret
-            // edilmeden sonuç listesine de yazılmasın.
-            if (info?.private === true) {
-              recordExcluded(u, info, 'Kilitli (gizli) hesap.', 'private');
-              continue;
-            }
-            // Read from Instagram's own hover-preview card (see instagram.mjs)
-            // when available, so this skip happens before any profile visit.
-            if (typeof info?.followers === 'number') {
-              if (info.followers > aiConfig.fameFollowerThreshold) {
-                recordExcluded(
-                  u,
-                  info,
-                  `${aiConfig.fameFollowerThreshold.toLocaleString('tr-TR')}+ takipçili (ünlü olarak değerlendirildi).`,
-                  'fame',
-                );
-                continue;
-              }
-              if (info.followers < aiConfig.minFollowerThreshold) {
-                recordExcluded(
-                  u,
-                  info,
-                  `${aiConfig.minFollowerThreshold.toLocaleString('tr-TR')} takipçi altında (minimum eşiğin altında).`,
-                  'min',
-                );
-                continue;
-              }
-            }
-            pending.push({ u, info });
-          }
-          // AI screening never touches Instagram (only OpenAI), so running
-          // several at once is free of the pacing/detection concerns that
-          // keep profile visits sequential — just a handful in flight so a
-          // single source's screening doesn't take one call per candidate.
-          const excluded = new Map();
-          if (screenByPhoto && pending.length) {
-            let done = 0;
-            const concurrency = Math.min(6, pending.length);
-            const next = pending.values();
-            const worker = async () => {
-              for (const { u, info } of next) {
-                signal.throwIfAborted();
-                // On OpenAI rate limiting (429), wait and retry the same
-                // candidate a few times before giving up on it — other
-                // workers' lanes keep progressing meanwhile.
-                for (let attempt = 0; ; attempt++) {
-                  try {
-                    // The real profile photo (from Instagram's own following-
-                    // list data) is what determines whether the account
-                    // *looks like* a person — a post thumbnail can be a
-                    // screenshot, product shot or quote card that has
-                    // nothing to do with the account owner's appearance, and
-                    // wrongly excluding on that basis was the bug here.
-                    const screen = await screenPhoto(
-                      info?.fullName,
-                      info?.photoUrl || info?.photos?.[0],
-                      aiConfig,
-                      signal,
-                    );
-                    if (screen.isPerson === false)
-                      excluded.set(u, {
-                        reason:
-                          'Fotoğrafta gerçek bir kişi tespit edilemedi (AI).',
-                        source: 'ai-person',
-                      });
-                    else if (
-                      aiConfig.genderExclude !== 'kapalı' &&
-                      screen.genderGuess === aiConfig.genderExclude
-                    )
-                      excluded.set(u, {
-                        reason: `Cinsiyet tahmini "${aiConfig.genderExclude}" ile eşleşti (AI, kesin değil).`,
-                        source: 'ai-gender',
-                      });
-                    break;
-                  } catch (e) {
-                    if (signal.aborted) throw e;
-                    if (e.status === 429 && attempt < 3) {
-                      await delay(1000 * 2 ** attempt, null, { signal });
-                      continue;
-                    }
-                    // Not rate-limited, or retries exhausted: fall through
-                    // and include the candidate for a full read rather than
-                    // blocking the source on one persistent failure.
-                    break;
-                  }
-                }
-                done++;
-                job.message = `@${source}: adaylar taranıyor (${done}/${pending.length})…`;
-                await save();
-              }
-            };
-            await Promise.all(
-              Array.from({ length: concurrency }, () => worker()),
-            );
-          }
-          for (const { u, info } of pending) {
-            const entry = excluded.get(u);
-            if (entry) {
-              recordExcluded(u, info, entry.reason, entry.source);
-              continue;
-            }
-            if (targets.size >= 5000) break;
-            targets.add(u);
-          }
+          await screenAndAddCandidates({
+            users: result.users,
+            job,
+            jobsList: jobs,
+            platform,
+            candidateSettings,
+            targets,
+            recordExcluded,
+            signal,
+            save,
+            progressLabel: `@${source}`,
+          });
           addDiscovered(targets);
           persistTargets();
           await save();
@@ -678,6 +680,32 @@ async function run(job, controller) {
         }
       }
       noteSkippedDiscovery();
+    } else if (job.mode === 'candidates') {
+      // Like 'profiles' — sources are the exact handles to visit, not
+      // accounts to crawl — but runs them through the same pre-visit
+      // filters 'following' mode applies, using whatever followers/
+      // fullname/private data job.candidates already has for them (from
+      // the CSV upload — see candidateInfoFromCsv — or nothing at all,
+      // in which case a handle just always survives these filters).
+      if (!resuming) {
+        job.message = 'Aday listesi taranıyor…';
+        await save();
+        await screenAndAddCandidates({
+          users: job.sources,
+          job,
+          jobsList: jobs,
+          platform,
+          candidateSettings,
+          targets,
+          recordExcluded,
+          signal,
+          save,
+          progressLabel: 'Aday listesi',
+        });
+        addDiscovered(targets);
+        persistTargets();
+        await save();
+      }
     } else if (!resuming) {
       job.sources.forEach((s) => targets.add(s));
       addDiscovered(targets);
@@ -685,7 +713,11 @@ async function run(job, controller) {
     job.remainingUsers = [...targets];
     job.total = job.done + targets.size;
     await save();
-    if (!targets.size)
+    // Only 'following'/'search' failing to find anyone is actually a
+    // problem worth erroring on — for 'candidates', every submitted handle
+    // legitimately being filtered out (fame/private/title/min-follower/
+    // excluded-list) is a normal, successful outcome, not a read failure.
+    if (!targets.size && ['following', 'search'].includes(job.mode))
       throw new Error(
         job.warnings.length
           ? `Takip listesi alınamadı. ${job.warnings[0]}`
@@ -786,7 +818,7 @@ async function run(job, controller) {
           collectedAt: new Date().toISOString(),
         };
       }
-      if (job.mode === 'profiles')
+      if (['profiles', 'candidates'].includes(job.mode))
         job.warnings.push(
           ...sourceLimitWarnings(handle, row.followers, null, job.limit),
         );
@@ -1906,7 +1938,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && route === '/api/parse') {
       const b = await body(req);
       const platform = platformName(b.platform);
-      const usernames = parseInput(b.text || '', !!b.csv, platform);
+      const usernames = parseInput(
+        b.text || '',
+        !!b.csv,
+        platform,
+        ['profiles', 'candidates'].includes(b.mode) ? 5000 : 500,
+      );
       // Lets the client warn before re-scanning someone already read
       // successfully in a past job (see 'profiles' mode's forceRescan
       // prompt) — cachedProfile is exactly what run() itself would reuse,
@@ -1924,7 +1961,12 @@ const server = http.createServer(async (req, res) => {
       const sources =
         b.mode === 'search' && platform === 'tiktok'
           ? searchTerms(b.text || '')
-          : parseInput(b.text || '', !!b.csv, platform);
+          : parseInput(
+              b.text || '',
+              !!b.csv,
+              platform,
+              ['profiles', 'candidates'].includes(b.mode) ? 5000 : 500,
+            );
       // Optional per-source "following" CSV column (see followingCounts) —
       // when present, smaller sources are read first so results and any
       // rest breaks land sooner instead of a huge source blocking everyone
@@ -1939,8 +1981,8 @@ const server = http.createServer(async (req, res) => {
       if (
         !(
           platform === 'tiktok'
-            ? ['following', 'search', 'profiles']
-            : ['following', 'profiles']
+            ? ['following', 'search', 'profiles', 'candidates']
+            : ['following', 'profiles', 'candidates']
         ).includes(b.mode)
       )
         throw new Error('Geçersiz tarama türü.');
@@ -1978,6 +2020,15 @@ const server = http.createServer(async (req, res) => {
         return send(res, 429, {
           error: `${platform === 'tiktok' ? 'TikTok' : 'Instagram'} kısıtı nedeniyle ${new Date(until).toLocaleString('tr-TR')} tarihine kadar yeni tarama kapalı. Kısıtın kalktığını ayrıca kontrol edin.`,
         });
+      // 'candidates' mode's CSV can carry the same followers/fullname/private
+      // data a following-mode scan would have collected via hover (see
+      // GET /api/jobs/:id/usernames's enriched export) — seeding
+      // job.candidates with it here is what lets run()'s pre-visit filters
+      // apply without ever reading a following list.
+      const candidateInfo =
+        b.mode === 'candidates' && b.csv
+          ? candidateInfoFromCsv(b.text || '', platform)
+          : undefined;
       const job = {
         id: randomUUID(),
         sources: orderedSources,
@@ -1996,6 +2047,7 @@ const server = http.createServer(async (req, res) => {
         message: 'Tarama hazırlanıyor…',
         warnings: [],
         createdAt: new Date().toISOString(),
+        ...(candidateInfo ? { candidates: candidateInfo } : {}),
       };
       jobs.unshift(job);
       try {
@@ -2032,12 +2084,37 @@ const server = http.createServer(async (req, res) => {
               ),
           ),
         ];
+        // followers/fullname/private come from the following-list hover
+        // data already collected during discovery (see candidates in
+        // instagram.mjs) \u2014 no profile visit needed for any of it. Feeding
+        // this same CSV back in as a 'candidates' mode scan (see
+        // candidateInfoFromCsv in domain.mjs) is what lets that mode apply
+        // the fame/min-follower/private/title pre-visit filters without
+        // ever re-reading the source's following list.
+        const rows = handles.map((h) => {
+          const info = job.candidates?.[h.toLowerCase()];
+          return [
+            h,
+            typeof info?.followers === 'number' ? info.followers : '',
+            info?.fullName || '',
+            info?.private === true
+              ? 'true'
+              : info?.private === false
+                ? 'false'
+                : '',
+          ];
+        });
         res.writeHead(200, {
           'Content-Type': 'text/csv; charset=utf-8',
           'Content-Disposition': 'attachment; filename="hiwell-usernames.csv"',
           'Cache-Control': 'no-store',
         });
-        res.end('\uFEFF' + ['username', ...handles].map(csvCell).join('\r\n'));
+        res.end(
+          '\uFEFF' +
+            [['username', 'followers', 'fullname', 'private'], ...rows]
+              .map((r) => r.map(csvCell).join(','))
+              .join('\r\n'),
+        );
         return;
       }
 

@@ -490,6 +490,56 @@ for (const testOrigin of [
         ).status,
         400,
       );
+      // 'candidates' mode with no enrichment data behaves exactly like
+      // 'profiles' — the pre-visit filters just have nothing to filter on.
+      const plainCandidatesResponse = await post('/api/jobs', {
+        text: 'cacheduser',
+        mode: 'candidates',
+      });
+      assert.equal(plainCandidatesResponse.status, 201);
+      const plainCandidatesJob = await plainCandidatesResponse.json();
+      let plainCandidatesResult;
+      for (let i = 0; i < 100; i++) {
+        plainCandidatesResult = await (
+          await get(`/api/jobs/${plainCandidatesJob.id}`)
+        ).json();
+        if (
+          !['queued', 'running', 'stopping'].includes(
+            plainCandidatesResult.status,
+          )
+        )
+          break;
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      assert.equal(plainCandidatesResult.status, 'completed');
+      assert.equal(plainCandidatesResult.rows[0]?.reused, true);
+      // With an enriched CSV (the same shape GET .../usernames exports), a
+      // candidate over the fame threshold is filtered before any visit —
+      // reusing 'cacheduser' (rather than an uncached handle) keeps this
+      // test from also tripping the unrelated "platform restricted, needs
+      // a live Instagram visit" gate a genuinely uncached handle would hit
+      // given the fixture's active restriction; the fame filter itself
+      // runs against the CSV-supplied followers regardless of caching.
+      const enrichedResponse = await post('/api/jobs', {
+        text: 'username,followers,fullname,private\ncacheduser,999999,Famous User,false',
+        csv: true,
+        mode: 'candidates',
+      });
+      assert.equal(enrichedResponse.status, 201);
+      const enrichedJob = await enrichedResponse.json();
+      let enrichedResult;
+      for (let i = 0; i < 100; i++) {
+        enrichedResult = await (
+          await get(`/api/jobs/${enrichedJob.id}`)
+        ).json();
+        if (!['queued', 'running', 'stopping'].includes(enrichedResult.status))
+          break;
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      assert.equal(enrichedResult.status, 'completed');
+      assert.equal(enrichedResult.rows.length, 0);
+      assert.equal(enrichedResult.cachedCount, 0);
+      assert.equal(enrichedResult.excludedCandidates.cacheduser.source, 'fame');
     } finally {
       child.kill('SIGTERM');
       await new Promise((resolve) => {

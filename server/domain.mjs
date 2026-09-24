@@ -44,7 +44,12 @@ export function username(value, platform = 'instagram') {
     throw new Error(`Geçersiz kullanıcı adı: ${s.slice(0, 60)}`);
   return s;
 }
-export function parseInput(text, csv = false, platform = 'instagram') {
+export function parseInput(
+  text,
+  csv = false,
+  platform = 'instagram',
+  maxCount = 500,
+) {
   let values;
   if (csv) {
     const firstLine = text.replace(/^\uFEFF/, '').split(/\r?\n/)[0];
@@ -79,8 +84,10 @@ export function parseInput(text, csv = false, platform = 'instagram') {
   } else values = text.split(/[\s,;]+/).filter(Boolean);
   const result = [...new Set(values.map((value) => username(value, platform)))];
   if (!result.length) throw new Error('En az bir kullanıcı adı girin.');
-  if (result.length > 500)
-    throw new Error('Bir taramada en fazla 500 kaynak hesap girilebilir.');
+  if (result.length > maxCount)
+    throw new Error(
+      `Bir taramada en fazla ${maxCount.toLocaleString('tr-TR')} hesap girilebilir.`,
+    );
   return result;
 }
 // An optional extra CSV column (alongside the username/url one parseInput
@@ -136,10 +143,86 @@ export function followingCounts(text, platform = 'instagram') {
     } catch {
       continue;
     }
-    const n = Number(String(row[countCol] ?? '').replace(/[.,\s]/g, ''));
+    const raw = String(row[countCol] ?? '').trim();
+    if (!raw) continue;
+    const n = Number(raw.replace(/[.,\s]/g, ''));
     if (Number.isFinite(n) && n >= 0) counts[u] = n;
   }
   return counts;
+}
+// Optional extra CSV columns (followers/fullname/private) — matches the
+// enriched export at GET /api/jobs/:id/usernames. Lets a 'candidates' mode
+// scan (see index.mjs) apply the same fame/min-follower/private/title
+// pre-visit filters 'following' mode uses, without a following-list read:
+// this data already came from one, earlier, and is just being replayed.
+// Silently returns {} for plain input or a CSV with none of these columns
+// — nothing here is required, filters just apply to fewer users without it.
+export function candidateInfoFromCsv(text, platform = 'instagram') {
+  if (!text) return {};
+  const firstLine = text.replace(/^﻿/, '').split(/\r?\n/)[0];
+  let records;
+  try {
+    records = parse(text, {
+      bom: true,
+      skip_empty_lines: true,
+      trim: true,
+      delimiter: firstLine.includes(';') ? ';' : ',',
+      relax_column_count: true,
+    });
+  } catch {
+    return {};
+  }
+  if (records.length < 2) return {};
+  const headers = records[0].map((x) =>
+    String(x).toLocaleLowerCase('tr').replace(/[_\s]/g, ''),
+  );
+  const userCol = headers.findIndex((x) =>
+    [
+      'username',
+      'kullanıcıadı',
+      'kullaniciadi',
+      'url',
+      'instagram',
+      'tiktok',
+    ].includes(x),
+  );
+  if (userCol < 0) return {};
+  const followersCol = headers.findIndex((x) =>
+    [
+      'followers',
+      'takipçi',
+      'takipci',
+      'takipçisayısı',
+      'takipcisayisi',
+    ].includes(x),
+  );
+  const nameCol = headers.findIndex((x) =>
+    ['fullname', 'isim', 'adsoyad', 'ad'].includes(x),
+  );
+  const privateCol = headers.findIndex((x) => ['private', 'gizli'].includes(x));
+  if (followersCol < 0 && nameCol < 0 && privateCol < 0) return {};
+  const info = {};
+  for (const row of records.slice(1)) {
+    let u;
+    try {
+      u = username(row[userCol], platform);
+    } catch {
+      continue;
+    }
+    const entry = {};
+    const rawFollowers = String(row[followersCol] ?? '').trim();
+    if (followersCol >= 0 && rawFollowers) {
+      const n = Number(rawFollowers.replace(/[.,\s]/g, ''));
+      if (Number.isFinite(n) && n >= 0) entry.followers = n;
+    }
+    if (nameCol >= 0 && row[nameCol]) entry.fullName = String(row[nameCol]);
+    if (privateCol >= 0 && String(row[privateCol] ?? '').trim())
+      entry.private = /^(true|1|evet|yes|gizli)$/i.test(
+        String(row[privateCol]).trim(),
+      );
+    if (Object.keys(entry).length) info[u] = entry;
+  }
+  return info;
 }
 // Following-list discovery's cost scales with how many accounts a source
 // follows (each candidate gets a hover-card lookup — see instagram.mjs), so
