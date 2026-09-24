@@ -100,7 +100,8 @@ export class WorkQueue {
     );
     if (!task) return;
     const controller = new AbortController();
-    this.running.set(lane, { id: task.id, controller });
+    const entry = { id: task.id, controller };
+    this.running.set(lane, entry);
     task.status = 'running';
     task.startedAt = new Date().toISOString();
     try {
@@ -127,9 +128,22 @@ export class WorkQueue {
       try {
         await this.save();
       } finally {
-        this.running.delete(lane);
+        // forget() may already have handed this lane to a newer task by the
+        // time this call finally settles (if it ever does — see forget()'s
+        // own comment) — only clear the slot if it's still this call's.
+        if (this.running.get(lane) === entry) this.running.delete(lane);
       }
     }
+  }
+  // Releases a lane whose worker() call will never settle on its own — e.g.
+  // Playwright's pipeTransport throwing outside any promise this queue
+  // awaits when the browser process it's talking to dies mid-message (see
+  // the uncaughtException handler in index.mjs). The abandoned worker()
+  // call is left running in memory rather than force-cancelled; drainLane's
+  // finally block is identity-checked above so it can never clobber
+  // whatever task takes the lane next, even if it does eventually settle.
+  forget(lane) {
+    this.running.delete(lane);
   }
   close() {
     this.closed = true;

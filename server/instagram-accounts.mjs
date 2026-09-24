@@ -101,6 +101,7 @@ export class InstagramAccounts {
         a.id !== excludeId &&
         a.enabled &&
         a.status !== 'suspended' &&
+        !(a.restrictedUntil > Date.now()) &&
         !this.quotaReached(a),
     );
   }
@@ -314,6 +315,31 @@ export class InstagramAccounts {
         at: new Date().toISOString(),
         username: next.username,
         message: 'Sonraki tanımlı hesaba geçildi.',
+      });
+    }
+    this.state.events = this.state.events.slice(0, 100);
+    await this.save();
+    return next;
+  }
+  // A restriction is temporary (unlike suspension) — the account stays
+  // enabled, just excluded from nextAvailable() until `until` passes, so
+  // it's naturally eligible again later without any manual reset.
+  async restrictAndNext(until) {
+    const current = this.current();
+    if (!current) return null;
+    current.restrictedUntil = until;
+    this.state.events.unshift({
+      at: new Date().toISOString(),
+      username: current.username,
+      message: `İşlem kısıtlaması algılandı; ${new Date(until).toLocaleString('tr-TR')} tarihine kadar bu hesap kullanılmayacak.`,
+    });
+    const next = this.state.autoSwitch ? this.nextAvailable(current.id) : null;
+    if (next) {
+      this.state.activeId = next.id;
+      this.state.events.unshift({
+        at: new Date().toISOString(),
+        username: next.username,
+        message: 'Kısıt nedeniyle sonraki tanımlı hesaba geçildi.',
       });
     }
     this.state.events = this.state.events.slice(0, 100);

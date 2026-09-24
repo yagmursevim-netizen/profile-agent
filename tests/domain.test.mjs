@@ -7,6 +7,10 @@ import {
   filterRows,
   csvCell,
   emails,
+  parseAbbreviatedCount,
+  followingCounts,
+  sortSourcesByFollowing,
+  excludedUsernameSet,
 } from '../server/domain.mjs';
 
 void test('CSV accepts BOM, quoted columns, Turkish headers and deduplicates profile URLs', () => {
@@ -105,4 +109,65 @@ void test('source limits distinguish follower warning and following truncation a
   assert.equal(warnings.length, 2);
   assert.match(warnings[0], /5.001 takipçisi/);
   assert.match(warnings[1], /6.000 hesap takip/);
+});
+void test('parseAbbreviatedCount reads exact, comma and K/M/B follower counts from hover-card text', () => {
+  assert.equal(parseAbbreviatedCount('661\nfollowers', 'followers'), 661);
+  assert.equal(parseAbbreviatedCount('12,345 followers', 'followers'), 12345);
+  assert.equal(parseAbbreviatedCount('12.3K\nfollowers', 'followers'), 12300);
+  assert.equal(parseAbbreviatedCount('1.2M followers', 'followers'), 1200000);
+  assert.equal(
+    parseAbbreviatedCount(
+      '128\nposts\n661\nfollowers\n806\nfollowing',
+      'followers',
+    ),
+    661,
+  );
+  assert.equal(parseAbbreviatedCount('no stats here', 'followers'), null);
+  assert.equal(parseAbbreviatedCount(null, 'followers'), null);
+});
+void test('followingCounts reads an optional CSV column, tolerates thousand separators, and stays empty without it', () => {
+  assert.deepEqual(
+    followingCounts(
+      'username,following\nbirinci,1.234\nikinci,"2,500"\nüçüncü,',
+    ),
+    { birinci: 1234, ikinci: 2500 },
+  );
+  // No recognized count column at all.
+  assert.deepEqual(followingCounts('username\nbirinci\nikinci'), {});
+  // Single-column CSV: no header to match a count against.
+  assert.deepEqual(followingCounts('birinci\nikinci'), {});
+  assert.deepEqual(followingCounts(''), {});
+  assert.deepEqual(followingCounts('not,a\nvalid csv "'), {});
+});
+void test('sortSourcesByFollowing orders known counts ascending, keeps unknowns in place, and no-ops with no counts at all', () => {
+  assert.deepEqual(
+    sortSourcesByFollowing(['big', 'small', 'medium'], {
+      big: 9000,
+      small: 100,
+      medium: 500,
+    }),
+    ['small', 'medium', 'big'],
+  );
+  // Unknown counts (no entry in the map) sort after every known one, but
+  // keep their original relative order among themselves.
+  assert.deepEqual(
+    sortSourcesByFollowing(['unknownA', 'known', 'unknownB'], {
+      known: 10,
+    }),
+    ['known', 'unknownA', 'unknownB'],
+  );
+  assert.deepEqual(sortSourcesByFollowing(['a', 'b', 'c'], {}), [
+    'a',
+    'b',
+    'c',
+  ]);
+});
+void test('excludedUsernameSet normalizes case, @, and both comma/newline separators', () => {
+  const set = excludedUsernameSet('@Birinci, ikinci\n Üçüncü\n\nbirinci');
+  assert.equal(set.has('birinci'), true);
+  assert.equal(set.has('ikinci'), true);
+  assert.equal(set.has('üçüncü'), true);
+  assert.equal(set.size, 3);
+  assert.deepEqual([...excludedUsernameSet('')], []);
+  assert.deepEqual([...excludedUsernameSet(undefined)], []);
 });

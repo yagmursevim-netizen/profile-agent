@@ -96,7 +96,8 @@ type ExcludedCandidate = {
     | 'min'
     | 'ai-person'
     | 'ai-gender'
-    | 'previously-rejected';
+    | 'previously-rejected'
+    | 'excluded-list';
 };
 const excludedFilterLabels: Record<string, string> = {
   title: 'Unvan öneki',
@@ -106,6 +107,7 @@ const excludedFilterLabels: Record<string, string> = {
   'ai-person': 'Gerçek kişi değil (AI)',
   'ai-gender': 'Cinsiyet (AI)',
   'previously-rejected': 'Daha önce uygun değil',
+  'excluded-list': 'Hariç tutulan kullanıcı',
 };
 type Job = {
   id: string;
@@ -852,6 +854,14 @@ function Workspace({
                       >
                         Örnek CSV şablonunu indir <ArrowDownToLine size={13} />
                       </a>
+                      {mode === 'following' && (
+                        <p className="field-hint">
+                          İsteğe bağlı bir “following” sütunu eklerseniz (kaynak
+                          hesabın takip ettiği kişi sayısı), kaynaklar en az
+                          takip edilenden en çoğa doğru sırayla taranır. Sütun
+                          yoksa sıralama değişmez.
+                        </p>
+                      )}
                     </TabsContent>
                   </Tabs>
                 )}
@@ -899,7 +909,20 @@ function Workspace({
                       onChange={setMarket}
                       options={[
                         { value: 'tr', label: 'Türkiye' },
-                        { value: 'other', label: 'Türkiye dışı (AB vb.)' },
+                        { value: 'az', label: 'Azerbaycan' },
+                        { value: 'uk', label: 'Birleşik Krallık' },
+                        { value: 'br', label: 'Brezilya' },
+                        { value: 'bg', label: 'Bulgaristan' },
+                        { value: 'fr', label: 'Fransa' },
+                        { value: 'mx', label: 'Meksika' },
+                        { value: 'pl', label: 'Polonya' },
+                        { value: 'pt', label: 'Portekiz' },
+                        { value: 'ro', label: 'Romanya' },
+                        { value: 'gr', label: 'Yunanistan' },
+                        { value: 'cz', label: 'Çekya' },
+                        { value: 'es', label: 'İspanya' },
+                        { value: 'it', label: 'İtalya' },
+                        { value: 'other', label: 'Diğer' },
                       ]}
                     />
                     <p className="field-hint">

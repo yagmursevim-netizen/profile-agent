@@ -36,6 +36,10 @@ void test('account passwords encrypted, snapshots redacted, bounded failover per
     const restored = await new InstagramAccounts(dir).init();
     assert.equal(restored.state.accounts[0].status, 'suspended');
     assert.equal(restored.current().username, 'second');
+    // 'first' is already suspended, so 'second' (current) has nowhere to
+    // switch to — the restriction is still recorded, but recover() has to
+    // give up and surface the original error, same as with no accounts at
+    // all configured.
     await assert.rejects(
       ig.recover(async () => {
         throw Object.assign(new Error('rate limit'), {
@@ -46,6 +50,7 @@ void test('account passwords encrypted, snapshots redacted, bounded failover per
       /rate limit/,
     );
     assert.equal(store.current().username, 'second');
+    assert.equal(store.current().restrictedUntil, 1);
     await assert.rejects(
       ig.recover(async () => {
         throw Object.assign(new Error('suspended'), { suspended: true });
@@ -56,6 +61,42 @@ void test('account passwords encrypted, snapshots redacted, bounded failover per
       store.state.accounts.every((a) => a.status === 'suspended'),
       true,
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+void test('a temporary restriction switches to the next available account and excludes it until it passes, unlike a permanent suspension', async () => {
+  const dir = await mkdtemp(tmpdir() + '/ig-accounts-');
+  try {
+    const store = await new InstagramAccounts(dir).init();
+    await store.update({ username: 'first', password: 'secret-first' });
+    await store.update({ username: 'second', password: 'secret-second' });
+    await store.update({ action: 'options', autoSwitch: true });
+    const ig = new Instagram();
+    ig.accounts = store;
+    ig.prepare = async () => {};
+    const until = Date.now() + 60_000;
+    let runs = 0;
+    const result = await ig.recover(async () => {
+      runs++;
+      if (store.current().username === 'first')
+        throw Object.assign(new Error('restricted'), {
+          blocked: true,
+          restrictedUntil: until,
+        });
+      return 'ok';
+    });
+    assert.equal(result, 'ok');
+    assert.equal(runs, 2);
+    assert.equal(store.current().username, 'second');
+    // Restricted, not suspended — stays enabled, just excluded while
+    // restrictedUntil hasn't passed yet.
+    const first = store.state.accounts.find((a) => a.username === 'first');
+    assert.equal(first.status, 'ready');
+    assert.equal(first.restrictedUntil, until);
+    assert.equal(store.nextAvailable(null)?.username, 'second');
+    first.restrictedUntil = Date.now() - 1;
+    assert.equal(store.nextAvailable(store.current().id)?.username, 'first');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

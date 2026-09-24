@@ -15,6 +15,7 @@ type Account = {
   dailyLimit?: number;
   scannedToday?: number;
   persona?: string;
+  restrictedUntil?: number;
 };
 type State = {
   accounts: Account[];
@@ -48,6 +49,10 @@ export function InstagramAccountsPanel() {
   const [generateError, setGenerateError] = useState<Record<string, string>>(
     {},
   );
+  // Read once per poll, not during render (Date.now() there would be an
+  // impure render call) — this only needs to be fresh enough for the
+  // "restricted until" label to eventually flip on its own, not exact.
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     let live = true;
     const read = async () => {
@@ -55,7 +60,10 @@ export function InstagramAccountsPanel() {
         const r = await fetch('/api/instagram/accounts');
         if (!r.ok) return;
         const s = (await r.json()) as State;
-        if (live) setState(s);
+        if (live) {
+          setState(s);
+          setNow(Date.now());
+        }
       } catch {}
     };
     void read();
@@ -245,13 +253,14 @@ export function InstagramAccountsPanel() {
             void save({ action: 'options', autoSwitch: e.target.checked })
           }
         />{' '}
-        Oturum sahibi hesabın askıya alındığı açıkça bildirilirse veya günlük
-        profil sınırına ulaşılırsa sıradaki kullanılabilir hesaba geç
+        Oturum sahibi hesap askıya alınırsa, işlem kısıtlaması bildirirse veya
+        günlük profil sınırına ulaşırsa sıradaki kullanılabilir hesaba geç
       </label>
       <small>
-        Genel işlem/IP kısıtında ve doğrulama ekranında hesap değiştirilmez.
-        Yeni hesap da kısıtlanabilir; kesintisiz çalışma garantisi yoktur.
-        Askıya alınmış veya günlük sınırına ulaşmış hesap sırada atlanır.
+        Giriş/doğrulama (2FA, CAPTCHA) ekranında hesap değiştirilmez — bunlar
+        admin müdahalesi gerektirir. Yeni hesap da kısıtlanabilir; kesintisiz
+        çalışma garantisi yoktur. Askıya alınmış, kısıtlı veya günlük sınırına
+        ulaşmış hesap sırada atlanır.
       </small>
       {state.accounts.map((a) => (
         <div key={a.id}>
@@ -259,9 +268,11 @@ export function InstagramAccountsPanel() {
           {state.activeId === a.id ? 'Aktif · ' : ''}
           {a.status === 'suspended'
             ? 'Askıya alındı'
-            : a.enabled
-              ? 'Kullanılabilir'
-              : 'Kapalı'}{' '}
+            : a.restrictedUntil && a.restrictedUntil > now
+              ? `Kısıtlı (${new Date(a.restrictedUntil).toLocaleString('tr-TR')} kadar)`
+              : a.enabled
+                ? 'Kullanılabilir'
+                : 'Kapalı'}{' '}
           · {a.proxyServer ? `Proxy: ${a.proxyServer}` : 'Proxy yok'} ·{' '}
           {a.dailyLimit
             ? `Bugün: ${a.scannedToday || 0}/${a.dailyLimit}`

@@ -36,3 +36,48 @@ void test('inclusive follower bounds support zero, empty and inverted range; exp
   );
   assert.equal(filterRows, selectProfiles);
 });
+void test('fit filter accepts multiple verdicts (OR match), an empty list is a no-op, and __unassessed__ selects rows with no AI result', () => {
+  const scored = [
+    { username: 'yes', ai: { verdict: 'Uygun aday' } },
+    { username: 'no', ai: { verdict: 'Uygun değil' } },
+    { username: 'review', ai: { verdict: 'İncelenmeli' } },
+    { username: 'pending', ai: null },
+  ];
+  assert.deepEqual(
+    selectProfiles(scored, { fit: ['Uygun aday'] }).map((r) => r.username),
+    ['yes'],
+  );
+  assert.deepEqual(
+    selectProfiles(scored, {
+      fit: ['Uygun aday', '__unassessed__'],
+    }).map((r) => r.username),
+    ['yes', 'pending'],
+  );
+  assert.equal(selectProfiles(scored, { fit: [] }).length, 4);
+  assert.equal(selectProfiles(scored, {}).length, 4);
+  assert.deepEqual(
+    selectProfiles(scored, { fit: ['__unassessed__'] }).map((r) => r.username),
+    ['pending'],
+  );
+});
+void test('emailOnly and dmOnly combine with OR — checking both shows either signal, not just profiles with both', () => {
+  const contacts = [
+    { username: 'emailer', email: 'a@b.com', dmForCollaboration: false },
+    { username: 'dmer', email: null, dmForCollaboration: true },
+    { username: 'neither', email: null, dmForCollaboration: false },
+  ];
+  assert.deepEqual(
+    selectProfiles(contacts, { emailOnly: true }).map((r) => r.username),
+    ['emailer'],
+  );
+  assert.deepEqual(
+    selectProfiles(contacts, { dmOnly: true }).map((r) => r.username),
+    ['dmer'],
+  );
+  assert.deepEqual(
+    selectProfiles(contacts, { emailOnly: true, dmOnly: true }).map(
+      (r) => r.username,
+    ),
+    ['emailer', 'dmer'],
+  );
+});

@@ -187,9 +187,17 @@ export class Instagram {
         return await operation();
       } catch (e) {
         const id = this.accounts?.current()?.id;
-        if (!e.suspended || !id || tried.has(id)) throw e;
+        // Suspension is permanent (account excluded until manually re-
+        // enabled); a restriction is temporary (excluded until its
+        // restrictedUntil passes) — both are switch-and-retry-worthy,
+        // unlike every other error this deliberately lets through.
+        if ((!e.suspended && !e.restrictedUntil) || !id || tried.has(id))
+          throw e;
         tried.add(id);
-        if (!(await this.accounts.suspendAndNext())) throw e;
+        const next = e.suspended
+          ? await this.accounts.suspendAndNext()
+          : await this.accounts.restrictAndNext(e.restrictedUntil);
+        if (!next) throw e;
         await this.context?.close();
       }
     }

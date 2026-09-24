@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { InstagramAccountsPanel } from '@/components/instagram-accounts';
 export function ConnectionSettings() {
   const [config, setConfig] = useState({
@@ -15,6 +16,7 @@ export function ConnectionSettings() {
     fameFollowerThreshold: 100000,
     minFollowerThreshold: 0,
     titlePrefixes: 'dr,dyt,psk,av,prof',
+    excludedUsernames: '',
     genderExclude: 'erkek',
     autoAssess: false,
     autoAssessLimit: 100,
@@ -259,6 +261,24 @@ export function ConnectionSettings() {
         Görünen adı bu öneklerden biriyle (nokta veya boşlukla ayrılmış)
         başlayan hesaplar hiç değerlendirilmez. Örn. “Dr. Ayşe”, “Prof. Dr.
         Zeynep”.
+      </p>
+      <label htmlFor="excluded-usernames">
+        Hariç tutulacak kullanıcılar (virgül veya satır sonuyla ayrılmış)
+      </label>
+      <Textarea
+        id="excluded-usernames"
+        className="account-input"
+        value={config.excludedUsernames}
+        onChange={(e) =>
+          setConfig({ ...config, excludedUsernames: e.target.value })
+        }
+        placeholder={'@kullaniciadi\nbaska.kullanici'}
+      />
+      <p className="field-hint">
+        Bu listedeki kullanıcı adları, takip listesi taramasında profil hiç
+        ziyaret edilmeden atlanır (“Elenen adaylar” altında görünür). Kaynak
+        hesap olarak veya doğrudan hesap listesiyle taranan profilleri
+        etkilemez.
       </p>
       <label htmlFor="gender-exclude">Cinsiyet elemesi</label>
       <select

@@ -154,7 +154,7 @@ void test('restriction notification goes only to authorized recipients once, per
     () => assert.fail('No duplicate on uncertainty'),
   );
 });
-void test('crash notification goes to the authorized recipients, includes no bio text, and never throws even if sending fails', async () => {
+void test('crash notification goes to the authorized recipients, includes no bio text, never throws even if sending fails, and is cooled down between repeats of the same underlying fault', async () => {
   const job = {
     id: 'crashed-job',
     sources: ['example'],
@@ -162,6 +162,7 @@ void test('crash notification goes to the authorized recipients, includes no bio
   };
   const config = { gmailAppPassword: 'fakeapppasswordxx' };
   let calls = 0;
+  let clock = 1_000;
   const send = async (mail) => {
     calls++;
     assert.deepEqual(
@@ -172,17 +173,40 @@ void test('crash notification goes to the authorized recipients, includes no bio
     assert.equal(mail.text.includes('crashed-job'), true);
     return { accepted: mail.to };
   };
-  await notifyCrash(new Error('boom'), job, config, send);
+  await notifyCrash(new Error('boom'), job, config, send, () => clock);
   assert.equal(calls, 1);
   // No app password: skipped entirely, never throws.
-  await notifyCrash(new Error('boom'), job, {}, () =>
-    assert.fail('No send without app password'),
+  await notifyCrash(
+    new Error('boom'),
+    job,
+    {},
+    () => assert.fail('No send without app password'),
+    () => clock,
   );
+  // A retry of the same fault moments later (e.g. a corrupted browser
+  // profile crashing again on every auto-resume attempt) must not send a
+  // second email — one alert the admin can act on, not a flood.
+  await notifyCrash(
+    new Error('boom'),
+    job,
+    config,
+    () => assert.fail('No repeat send within the cooldown window'),
+    () => clock,
+  );
+  assert.equal(calls, 1);
   // The send itself failing must not propagate — this runs inside an
-  // uncaughtException handler, where a throw would be fatal.
-  await notifyCrash(new Error('boom'), null, config, async () => {
-    throw new Error('smtp rejected');
-  });
+  // uncaughtException handler, where a throw would be fatal. Advance past
+  // the cooldown so this call actually reaches sendMail.
+  clock += 20 * 60_000;
+  await notifyCrash(
+    new Error('boom'),
+    null,
+    config,
+    async () => {
+      throw new Error('smtp rejected');
+    },
+    () => clock,
+  );
 });
 void test('notifyTest sends to both configured recipients and reports the outcome without throwing', async () => {
   const config = { gmailAppPassword: 'fakeapppasswordxx' };

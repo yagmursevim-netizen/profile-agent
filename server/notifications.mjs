@@ -38,12 +38,27 @@ function outcomeFor(err) {
     ? 'unknown'
     : 'failed';
 }
+// A single underlying fault (e.g. a corrupted Chromium profile directory)
+// can throw this same uncaught exception again on every retry — without a
+// cooldown, that would mean one crash email per retry instead of one alert
+// the admin can actually act on.
+const CRASH_NOTIFY_COOLDOWN_MS = 15 * 60_000;
+let lastCrashNotifyAt = -Infinity;
 // Best-effort — a failed notification attempt must never throw back into
 // the uncaughtException handler that calls this, or a notification bug
 // could reintroduce the very crash-takes-down-everything problem this
 // exists to report on.
-export async function notifyCrash(err, job, config, sendMail = realSendMail) {
+export async function notifyCrash(
+  err,
+  job,
+  config,
+  sendMail = realSendMail,
+  now = Date.now,
+) {
   if (!config.gmailAppPassword) return;
+  const t = now();
+  if (t - lastCrashNotifyAt < CRASH_NOTIFY_COOLDOWN_MS) return;
+  lastCrashNotifyAt = t;
   try {
     await sendNotification(
       {

@@ -39,5 +39,10 @@ next-env.d.ts
 /.local/
 *.tsbuildinfo
 !.env.example
-/ig-update-all.zip
+
+# unrelated local scratch — not part of the app, may carry credentials/PII
+/IG Agent 2/
+/mail*.json
+/mail*.json.bak
 /.openai/
+/ig-update-all.zip

@@ -35,6 +35,10 @@ export function settings() {
     fameFollowerThreshold: saved.fameFollowerThreshold ?? 100_000,
     minFollowerThreshold: saved.minFollowerThreshold ?? 0,
     titlePrefixes: saved.titlePrefixes || 'dr,dyt,psk,av,prof',
+    // Free-text roster (comma or newline separated) checked against every
+    // scanned candidate right before a profile visit — see
+    // excludedUsernameSet() in domain.mjs and its use in index.mjs's run().
+    excludedUsernames: saved.excludedUsernames || '',
     genderExclude: saved.genderExclude || 'erkek', // 'erkek' | 'kadın' | 'kapalı'
     // If on, a profile with an email or a DM-collaboration signal gets the
     // post-visit AI verdict automatically during the scan itself, instead of
@@ -65,6 +69,7 @@ export function publicSettings() {
     fameFollowerThreshold: s.fameFollowerThreshold,
     minFollowerThreshold: s.minFollowerThreshold,
     titlePrefixes: s.titlePrefixes,
+    excludedUsernames: s.excludedUsernames,
     genderExclude: s.genderExclude,
     autoAssess: s.autoAssess,
     autoAssessLimit: s.autoAssessLimit,
@@ -118,6 +123,22 @@ export async function updateSettings(input) {
     throw new Error(
       'Ünvan önekleri virgülle ayrılmış harflerden oluşmalı (örn. dr,dyt,psk).',
     );
+  // Unlike the plain string fields above, this one is allowed to contain
+  // newlines (one username per line is the natural way to paste a roster)
+  // and an empty string is a valid, meaningful value — it clears the list —
+  // so it's validated on its own instead of through that shared loop.
+  if (typeof input.excludedUsernames === 'string') {
+    const cleaned = input.excludedUsernames.trim();
+    if (cleaned.length > 20000)
+      throw new Error(
+        'Hariç tutulacak kullanıcı listesi çok uzun (en fazla 20.000 karakter).',
+      );
+    if (cleaned && !/^[a-zA-Z0-9._@,\s]+$/.test(cleaned))
+      throw new Error(
+        'Hariç tutulacak kullanıcı adları yalnızca harf, rakam, nokta, alt çizgi, @ ve virgül/satır sonu içerebilir.',
+      );
+    next.excludedUsernames = cleaned;
+  }
   if (typeof input.fameFollowerThreshold !== 'undefined') {
     const n = Number(input.fameFollowerThreshold);
     if (!Number.isInteger(n) || n < 1 || n > 1_000_000_000)

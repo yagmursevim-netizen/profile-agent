@@ -46,6 +46,9 @@ import {
   HEADERS,
   rowValues,
   csvCell,
+  followingCounts,
+  sortSourcesByFollowing,
+  excludedUsernameSet,
 } from './domain.mjs';
 
 // Playwright's own internal IPC to the browser process (pipeTransport.js)
@@ -80,6 +83,13 @@ process.on('uncaughtException', (err) => {
     }
     active.controller.abort();
     active = null;
+    // The worker() call this crash interrupted never settles — its promise
+    // is just permanently stuck awaiting a browser process that's gone —
+    // so drainLane's own cleanup never runs and the scan lane would stay
+    // wedged "running" forever, silently blocking every future auto-resume
+    // attempt. Releasing it here is what lets autoResumeBlocked() actually
+    // restart the job instead of just marking it and never trying again.
+    queue.forget('scan');
     void save();
   }
   void notifyCrash(err, affectedJob, settings());
@@ -109,6 +119,27 @@ function titlePrefixFilterFor(job, candidateSettings) {
   if (job.market && job.market !== 'tr') return /(?!)/; // never matches
   return titlePrefixRegex(candidateSettings.titlePrefixes);
 }
+// Must stay in sync with the "Hedef pazar" dropdown in app/page.tsx — every
+// value it can send has to be accepted here. Only 'tr' has any behavioral
+// effect (see titlePrefixFilterFor above); the rest just record which
+// market a scan targeted.
+const MARKETS = [
+  'tr',
+  'az',
+  'uk',
+  'br',
+  'bg',
+  'fr',
+  'mx',
+  'pl',
+  'pt',
+  'ro',
+  'gr',
+  'cz',
+  'es',
+  'it',
+  'other',
+];
 // A stopped scan can have real work left even with an empty
 // remainingUsers — a 'following'/'search' job that was interrupted before
 // finishing discovery of every source has nothing queued to visit yet, but
@@ -260,6 +291,23 @@ async function run(job, controller) {
   // used to flag them after a full visit stay consistent for this run, even
   // if Bağlantılar is edited mid-scan.
   const candidateSettings = settings();
+  // Elenen adayları da (fotoğraf + sebep ile) görünür tut, sonradan yalnızca
+  // hedef listeden değil bu kayıttan da kaldırılabilsin. source tags which
+  // filter stage excluded a candidate — only 'ai' ones are worth a cheap
+  // re-screen later (see /rescreen-excluded); the others are deterministic
+  // and re-running them changes nothing.
+  const recordExcluded = (u, info, reason, source) => {
+    job.excludedCandidates = {
+      ...job.excludedCandidates,
+      [u.toLowerCase()]: {
+        username: u,
+        fullName: info?.fullName || null,
+        photoUrl: info?.photoUrl || info?.photos?.[0] || null,
+        reason,
+        source,
+      },
+    };
+  };
   try {
     const ensureLogin = async () => {
       if (platform === 'tiktok') return;
@@ -380,33 +428,28 @@ async function run(job, controller) {
           const aiConfig = candidateSettings;
           const screenByPhoto = platform === 'instagram' && aiConfig.openaiKey;
           const titlePrefix = titlePrefixFilterFor(job, aiConfig);
-          // Elenen adayları da (fotoğraf + sebep ile) görünür tut, sonradan
-          // yalnızca hedef listeden değil bu kayıttan da kaldırılabilsin.
-          // source tags which filter stage excluded a candidate — only 'ai'
-          // ones are worth a cheap re-screen later (see /rescreen-excluded);
-          // the others are deterministic and re-running them changes nothing.
-          const recordExcluded = (u, info, reason, source) => {
-            job.excludedCandidates = {
-              ...job.excludedCandidates,
-              [u.toLowerCase()]: {
-                username: u,
-                fullName: info?.fullName || null,
-                photoUrl: info?.photoUrl || info?.photos?.[0] || null,
-                reason,
-                source,
-              },
-            };
-          };
           // Cheap, synchronous filters first (free, no network at all).
           // rejected: usernames the user (or AI) already marked "Uygun
           // değil" in any earlier job — recomputed per source so a
           // rejection made earlier in this same multi-source scan counts
           // too, not just past jobs.
           const rejected = rejectedUsernames(jobs, platform);
+          const excludedUsernames = excludedUsernameSet(
+            aiConfig.excludedUsernames,
+          );
           const pending = [];
           for (const u of result.users) {
             if (targets.size + pending.length >= 5000) break;
             const info = job.candidates?.[u.toLowerCase()];
+            if (excludedUsernames.has(u.toLowerCase())) {
+              recordExcluded(
+                u,
+                info,
+                'Hariç tutulacak kullanıcılar listesinde.',
+                'excluded-list',
+              );
+              continue;
+            }
             if (rejected.has(u.toLowerCase())) {
               recordExcluded(
                 u,
@@ -1772,6 +1815,17 @@ const server = http.createServer(async (req, res) => {
         b.mode === 'search' && platform === 'tiktok'
           ? searchTerms(b.text || '')
           : parseInput(b.text || '', !!b.csv, platform);
+      // Optional per-source "following" CSV column (see followingCounts) —
+      // when present, smaller sources are read first so results and any
+      // rest breaks land sooner instead of a huge source blocking everyone
+      // behind it; absent entirely, this is a no-op and order is untouched.
+      const orderedSources =
+        b.mode === 'following' && b.csv
+          ? sortSourcesByFollowing(
+              sources,
+              followingCounts(b.text || '', platform),
+            )
+          : sources;
       if (
         !(
           platform === 'tiktok'
@@ -1783,9 +1837,9 @@ const server = http.createServer(async (req, res) => {
       const limit = Number(b.limit ?? 5000);
       if (!Number.isInteger(limit) || limit < 1 || limit > 5000)
         throw new Error('Kaynak başına sınır 1–5.000 olmalı.');
-      if (b.market !== undefined && !['tr', 'other'].includes(b.market))
+      if (b.market !== undefined && !MARKETS.includes(b.market))
         throw new Error('Geçersiz hedef pazar.');
-      const market = b.market === 'other' ? 'other' : 'tr';
+      const market = MARKETS.includes(b.market) ? b.market : 'tr';
       const until = Math.max(
         0,
         ...jobs
@@ -1795,14 +1849,14 @@ const server = http.createServer(async (req, res) => {
       if (
         until > Date.now() &&
         (b.mode === 'search' ||
-          needsInstagram(jobs, sources, b.mode, limit, platform))
+          needsInstagram(jobs, orderedSources, b.mode, limit, platform))
       )
         return send(res, 429, {
           error: `${platform === 'tiktok' ? 'TikTok' : 'Instagram'} kısıtı nedeniyle ${new Date(until).toLocaleString('tr-TR')} tarihine kadar yeni tarama kapalı. Kısıtın kalktığını ayrıca kontrol edin.`,
         });
       const job = {
         id: randomUUID(),
-        sources,
+        sources: orderedSources,
         platform,
         mode: b.mode,
         market,
@@ -1827,7 +1881,7 @@ const server = http.createServer(async (req, res) => {
           ownerId: user.id,
           ownerName: user.name,
           platform,
-          title: sources.join(', ').slice(0, 120),
+          title: orderedSources.join(', ').slice(0, 120),
         });
       } catch (e) {
         jobs = jobs.filter((j) => j.id !== job.id);

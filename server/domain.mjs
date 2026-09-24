@@ -83,6 +83,91 @@ export function parseInput(text, csv = false, platform = 'instagram') {
     throw new Error('Bir taramada en fazla 500 kaynak hesap girilebilir.');
   return result;
 }
+// An optional extra CSV column (alongside the username/url one parseInput
+// already requires) — lets a following-mode scan know roughly how large
+// each source account is before ever opening it. Silently returns {} for
+// plain (non-CSV) input, a single-column CSV, or one with no recognized
+// count header; sortSourcesByFollowing already treats a missing count as
+// "unknown", so this is purely additive and never required.
+export function followingCounts(text, platform = 'instagram') {
+  if (!text) return {};
+  const firstLine = text.replace(/^﻿/, '').split(/\r?\n/)[0];
+  let records;
+  try {
+    records = parse(text, {
+      bom: true,
+      skip_empty_lines: true,
+      trim: true,
+      delimiter: firstLine.includes(';') ? ';' : ',',
+      relax_column_count: true,
+    });
+  } catch {
+    return {};
+  }
+  if (records.length < 2) return {};
+  const headers = records[0].map((x) =>
+    String(x).toLocaleLowerCase('tr').replace(/[_\s]/g, ''),
+  );
+  const userCol = headers.findIndex((x) =>
+    [
+      'username',
+      'kullanıcıadı',
+      'kullaniciadi',
+      'url',
+      'instagram',
+      'tiktok',
+    ].includes(x),
+  );
+  const countCol = headers.findIndex((x) =>
+    [
+      'following',
+      'takipedilen',
+      'takipedilensayısı',
+      'takipedilensayisi',
+      'followingcount',
+    ].includes(x),
+  );
+  if (userCol < 0 || countCol < 0) return {};
+  const counts = {};
+  for (const row of records.slice(1)) {
+    let u;
+    try {
+      u = username(row[userCol], platform);
+    } catch {
+      continue;
+    }
+    const n = Number(String(row[countCol] ?? '').replace(/[.,\s]/g, ''));
+    if (Number.isFinite(n) && n >= 0) counts[u] = n;
+  }
+  return counts;
+}
+// Following-list discovery's cost scales with how many accounts a source
+// follows (each candidate gets a hover-card lookup — see instagram.mjs), so
+// processing smaller sources first surfaces results faster and lets a large
+// one run last instead of blocking everything behind it. Sources with no
+// known count (the common case — followingCounts only finds one with a
+// specific CSV column) keep their original relative order: Array#sort is
+// stable, and every unknown count ties at Infinity, so with no counts at
+// all this is a no-op.
+export function sortSourcesByFollowing(sources, counts = {}) {
+  return [...sources].sort((a, b) => {
+    const ca = counts[a];
+    const cb = counts[b];
+    const va = typeof ca === 'number' ? ca : Infinity;
+    const vb = typeof cb === 'number' ? cb : Infinity;
+    return va - vb;
+  });
+}
+// Bağlantılar's "Hariç tutulacak kullanıcılar" free-text field (comma or
+// newline separated, '@' optional) parsed into a lowercase lookup set.
+export function excludedUsernameSet(list) {
+  return new Set(
+    String(list || '')
+      .split(/[\n,]+/)
+      .map((u) => u.trim().replace(/^@/, '').toLowerCase())
+      .filter(Boolean),
+  );
+}
 export function emails(bio) {
   return (
     [

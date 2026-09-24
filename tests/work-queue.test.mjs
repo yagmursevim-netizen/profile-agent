@@ -194,6 +194,52 @@ void test('performance separates platform, source counts, cache reuse, unique co
   assert.equal(report.rows.find((r) => r.userId === 'unknown').jobs, 1);
 });
 
+void test('forget() releases a lane whose worker() never settles on its own, without letting a late resolution clobber whatever task took the lane next', async () => {
+  const dir = await mkdtemp(tmpdir() + '/forget-');
+  try {
+    const started = [];
+    let resolveStuck, resolveNext;
+    const q = await new WorkQueue(dir, async (task) => {
+      started.push(task.title);
+      if (task.title === 'stuck')
+        return new Promise((resolve) => {
+          resolveStuck = resolve;
+        });
+      return new Promise((resolve) => {
+        resolveNext = resolve;
+      });
+    }).init();
+    await q.enqueue({ kind: 'scan', title: 'stuck' });
+    const stuckRun = q.drain();
+    while (started.length < 1) await new Promise((r) => setImmediate(r));
+    assert.equal(q.running.has('scan'), true);
+    // Simulates the pipeTransport-style crash: the in-flight worker() call
+    // is abandoned in place (it may never settle, or may settle much
+    // later) rather than actually cancelled — forget() just frees the lane
+    // for the next task regardless.
+    q.forget('scan');
+    assert.equal(q.running.has('scan'), false);
+    await q.enqueue({ kind: 'scan', title: 'next' });
+    const nextRun = q.drain();
+    while (started.length < 2) await new Promise((r) => setImmediate(r));
+    assert.deepEqual(started, ['stuck', 'next']);
+    // The abandoned 'stuck' call finally resolves while 'next' is still
+    // running in the same lane — its cleanup must not touch 'next's entry.
+    resolveStuck('late');
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(q.running.has('scan'), true);
+    assert.equal(q.tasks.find((t) => t.title === 'next').status, 'running');
+    resolveNext('ok');
+    await nextRun;
+    assert.equal(q.tasks.find((t) => t.title === 'next').status, 'completed');
+    assert.equal(q.running.has('scan'), false);
+    await stuckRun;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 void test('email and scan lanes run independently, preserve FIFO and cancel only their own worker', async () => {
   const dir = await mkdtemp(tmpdir() + '/lanes-');
   try {

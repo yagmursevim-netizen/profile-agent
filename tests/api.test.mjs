@@ -233,17 +233,27 @@ for (const testOrigin of [
         sendgridKey: 'fake-sendgrid-only-test',
         fromEmail: 'hello@example.com',
         openaiModel: 'gpt-5-mini',
+        excludedUsernames: '@blocked_one, blocked_two',
       };
       const settingsResponse = await post('/api/settings', secrets);
       assert.equal(settingsResponse.status, 200);
       const publicConfig = await settingsResponse.json();
       assert.equal(publicConfig.openaiConfigured, true);
       assert.equal(publicConfig.sendgridConfigured, true);
+      // Unlike the secrets above, this field isn't sensitive — it should
+      // round-trip through the public settings response as-is.
+      assert.equal(publicConfig.excludedUsernames, secrets.excludedUsernames);
       const publicText = JSON.stringify(
         await (await get('/api/settings')).json(),
       );
       assert.equal(publicText.includes(secrets.openaiKey), false);
       assert.equal(publicText.includes(secrets.sendgridKey), false);
+      assert.ok(publicText.includes('blocked_one'));
+      assert.equal(
+        (await post('/api/settings', { excludedUsernames: 'bad;chars!' }))
+          .status,
+        400,
+      );
       assert.equal(
         (await post('/api/tiktok/bridge/poll', { clientId: 'none' })).status,
         401,
@@ -379,6 +389,25 @@ for (const testOrigin of [
             text: 'one',
             mode: 'following',
             limit: 5001,
+          })
+        ).status,
+        400,
+      );
+      const marketResponse = await post('/api/jobs', {
+        text: 'cacheduser',
+        mode: 'profiles',
+        limit: 1,
+        market: 'pt',
+      });
+      assert.equal(marketResponse.status, 201);
+      assert.equal((await marketResponse.json()).market, 'pt');
+      assert.equal(
+        (
+          await post('/api/jobs', {
+            text: 'cacheduser',
+            mode: 'profiles',
+            limit: 1,
+            market: 'not-a-real-market',
           })
         ).status,
         400,
