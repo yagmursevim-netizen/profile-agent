@@ -549,3 +549,128 @@ for (const testOrigin of [
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+void test('save() prunes sourceLists/candidates from old non-active jobs at boot, keeps the 5 most recent, never touches active jobs, and always strips expired photo URLs', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-prune-test-'));
+  await mkdir(path.join(dir, '.local'));
+  const makeJob = (id, status) => ({
+    id,
+    sources: ['x'],
+    mode: 'following',
+    limit: 1,
+    total: 1,
+    done: 1,
+    status,
+    message: 'saved',
+    warnings: [],
+    createdAt: '2026-01-01T00:00:00Z',
+    rows: [],
+    sourceLists: { x: { users: ['a'] } },
+    candidates: { a: { fullName: 'A' } },
+    excludedCandidates: {
+      a: { username: 'a', photoUrl: 'https://cdn.example/a.jpg', reason: 'x' },
+    },
+  });
+  // pruneOldJobData walks the array in order — this mirrors real jobs.json,
+  // where jobs.unshift() on creation puts the newest job first.
+  const seeded = [
+    makeJob('recent-1', 'completed'),
+    makeJob('recent-2', 'completed'),
+    makeJob('recent-3', 'partial'),
+    makeJob('recent-4', 'failed'),
+    makeJob('recent-5', 'cancelled'),
+    makeJob('old-6', 'completed'),
+    makeJob('old-7', 'cancelled'),
+    makeJob('active-1', 'running'),
+    // 'blocked' is old (well past the recent-5 window) but still counts as
+    // active — quota/restriction jobs are exactly what auto-resume expects
+    // to pick back up, not abandoned scans.
+    makeJob('blocked-old', 'blocked'),
+  ];
+  await writeFile(path.join(dir, '.local/jobs.json'), JSON.stringify(seeded));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        if (/http:\/\/127.0.0.1:\d+/.test(String(c))) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let saved;
+    for (let i = 0; i < 50; i++) {
+      try {
+        saved = JSON.parse(
+          await readFile(path.join(dir, '.local/jobs.json'), 'utf8'),
+        );
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    const byId = Object.fromEntries(saved.map((j) => [j.id, j]));
+    for (const id of [
+      'recent-1',
+      'recent-2',
+      'recent-3',
+      'recent-4',
+      'recent-5',
+    ]) {
+      assert.ok(byId[id].sourceLists, `${id} should keep sourceLists`);
+      assert.ok(byId[id].candidates, `${id} should keep candidates`);
+    }
+    for (const id of ['old-6', 'old-7']) {
+      assert.equal(byId[id].sourceLists, undefined);
+      assert.equal(byId[id].candidates, undefined);
+    }
+    assert.ok(byId['active-1'].sourceLists, 'active job must never be pruned');
+    assert.ok(byId['active-1'].candidates, 'active job must never be pruned');
+    assert.ok(
+      byId['blocked-old'].sourceLists,
+      'blocked job must never be pruned regardless of age',
+    );
+    for (const job of saved)
+      if (
+        !['queued', 'running', 'stopping', 'interrupted', 'blocked'].includes(
+          job.status,
+        )
+      )
+        assert.equal(job.excludedCandidates?.a?.photoUrl, undefined);
+    assert.equal(
+      byId['active-1'].excludedCandidates.a.photoUrl,
+      'https://cdn.example/a.jpg',
+    );
+    assert.equal(
+      byId['blocked-old'].excludedCandidates.a.photoUrl,
+      'https://cdn.example/a.jpg',
+    );
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});

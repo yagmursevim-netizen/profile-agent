@@ -253,8 +253,46 @@ for (const job of jobs) {
       'Sunucu kapandığı için yarıda kaldı. Kaydedilen sonuçlar korunuyor.';
   }
 }
+// jobs.json is rewritten on nearly every state change (every profile visit,
+// every source read, ...), and every job carries its own full discovery
+// data (sourceLists, candidates — one entry per discovered account, photo
+// URLs included) forever. On a real deployment this reached 128MB from
+// just 20 scans and crashed the process (JSON.stringify of the whole file,
+// repeated on every save, ran it out of heap). That data's only value is
+// cache-reuse (cachedFollowing/cachedProfile) and pre-visit filtering for a
+// *future* scan of the same sources — valuable for recent work, essentially
+// dead weight for old completed scans nobody's going back to. Only the most
+// recent non-active jobs keep it; results (job.rows) are never touched.
+// 'interrupted'/'blocked' count as active here too — those are exactly the
+// jobs hasResumableWork() and "Devam et" expect to pick back up soon (see
+// the resumability fixes elsewhere in run()), not scans nobody's touching
+// again.
+const ACTIVE_STATUSES = [
+  'queued',
+  'running',
+  'stopping',
+  'interrupted',
+  'blocked',
+];
+const RECENT_JOBS_WITH_FULL_DISCOVERY_DATA = 5;
+function pruneOldJobData() {
+  let kept = 0;
+  for (const job of jobs) {
+    if (ACTIVE_STATUSES.includes(job.status)) continue;
+    // Instagram's own CDN photo URLs expire within hours regardless, so
+    // this is dead weight almost immediately — stripped for every
+    // non-active job, not just the ones past the recent-data cutoff.
+    if (job.excludedCandidates)
+      for (const c of Object.values(job.excludedCandidates)) delete c.photoUrl;
+    kept++;
+    if (kept <= RECENT_JOBS_WITH_FULL_DISCOVERY_DATA) continue;
+    delete job.sourceLists;
+    delete job.candidates;
+  }
+}
 let saveQueue = Promise.resolve();
 function save() {
+  pruneOldJobData();
   const json = JSON.stringify(jobs);
   saveQueue = saveQueue
     .catch(() => {})
