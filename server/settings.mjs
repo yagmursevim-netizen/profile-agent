@@ -63,6 +63,15 @@ export function settings() {
     accountSwitchEnabled: saved.accountSwitchEnabled ?? false,
     accountSwitchMinMinutes: saved.accountSwitchMinMinutes ?? 20,
     accountSwitchMaxMinutes: saved.accountSwitchMaxMinutes ?? 40,
+    // A time-based interval doesn't map cleanly onto between-source
+    // switches — one source's following-list read can take minutes or
+    // hours depending on its size, so a fixed time window ends up rotating
+    // after wildly different amounts of actual work. Counting sources
+    // instead (also randomized min/max, also redrawn every time) keeps
+    // the cadence tied to real workload regardless of how long any one
+    // source's hover/scroll phase takes.
+    accountSwitchMinSources: saved.accountSwitchMinSources ?? 1,
+    accountSwitchMaxSources: saved.accountSwitchMaxSources ?? 2,
   };
 }
 export function publicSettings() {
@@ -88,6 +97,8 @@ export function publicSettings() {
     accountSwitchEnabled: s.accountSwitchEnabled,
     accountSwitchMinMinutes: s.accountSwitchMinMinutes,
     accountSwitchMaxMinutes: s.accountSwitchMaxMinutes,
+    accountSwitchMinSources: s.accountSwitchMinSources,
+    accountSwitchMaxSources: s.accountSwitchMaxSources,
   };
 }
 export async function updateSettings(input) {
@@ -214,6 +225,20 @@ export async function updateSettings(input) {
     (next.accountSwitchMinMinutes ?? 20) > (next.accountSwitchMaxMinutes ?? 40)
   )
     throw new Error('Rotasyon alt sınırı üst sınırdan büyük olamaz.');
+  if (typeof input.accountSwitchMinSources !== 'undefined') {
+    const n = Number(input.accountSwitchMinSources);
+    if (!Number.isInteger(n) || n < 1 || n > 500)
+      throw new Error('Rotasyon alt sınırı 1-500 kaynak arasında olmalı.');
+    next.accountSwitchMinSources = n;
+  }
+  if (typeof input.accountSwitchMaxSources !== 'undefined') {
+    const n = Number(input.accountSwitchMaxSources);
+    if (!Number.isInteger(n) || n < 1 || n > 500)
+      throw new Error('Rotasyon üst sınırı 1-500 kaynak arasında olmalı.');
+    next.accountSwitchMaxSources = n;
+  }
+  if ((next.accountSwitchMinSources ?? 1) > (next.accountSwitchMaxSources ?? 2))
+    throw new Error('Rotasyon alt kaynak sınırı üst sınırdan büyük olamaz.');
   queue = queue
     .catch(() => {})
     .then(async () => {

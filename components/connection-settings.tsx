@@ -26,6 +26,8 @@ export function ConnectionSettings() {
     accountSwitchEnabled: false,
     accountSwitchMinMinutes: 20,
     accountSwitchMaxMinutes: 40,
+    accountSwitchMinSources: 1,
+    accountSwitchMaxSources: 2,
   });
   const [openaiKey, setOpenaiKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
@@ -415,6 +417,11 @@ export function ConnectionSettings() {
         />{' '}
         Hesap rotasyonu aktif
       </label>
+      <p className="field-hint">
+        <strong>Profil ziyaretleri arasında</strong> (her hesap ziyareti
+        sırasında): bu iki sayı arasında rastgele bir süre geçince rotasyon
+        tetiklenir.
+      </p>
       <label htmlFor="account-switch-min">En az kaç dakikada bir (dk)</label>
       <Input
         id="account-switch-min"
@@ -446,10 +453,47 @@ export function ConnectionSettings() {
         }
       />
       <p className="field-hint">
-        Her seferinde bu iki sayı arasında rastgele bir süre seçilir (örn. 20-40
-        dk arası) — sabit bir aralık olmadığı için her taramada farklı
-        zamanlarda geçiş olur. Kullanılamayan (askıya alınmış, kısıtlı, devre
-        dışı) hesaplar rotasyona hiç girmez.
+        <strong>Kaynaklar arasında</strong> (bir kaynağın takip listesi bitip
+        sıradakine geçilirken): dakika yerine kaynak sayısı sayılır — bir
+        kaynağın hover/kaydırma süresi çok değişken olduğundan, zamana göre
+        değil işe göre rotasyon yapılır (örn. 1-2 kaynakta bir).
+      </p>
+      <label htmlFor="account-switch-min-sources">En az kaç kaynakta bir</label>
+      <Input
+        id="account-switch-min-sources"
+        type="number"
+        min={1}
+        max={500}
+        disabled={!config.accountSwitchEnabled}
+        value={config.accountSwitchMinSources}
+        onChange={(e) =>
+          setConfig({
+            ...config,
+            accountSwitchMinSources: Number(e.target.value) || 1,
+          })
+        }
+      />
+      <label htmlFor="account-switch-max-sources">
+        En çok kaç kaynakta bir
+      </label>
+      <Input
+        id="account-switch-max-sources"
+        type="number"
+        min={1}
+        max={500}
+        disabled={!config.accountSwitchEnabled}
+        value={config.accountSwitchMaxSources}
+        onChange={(e) =>
+          setConfig({
+            ...config,
+            accountSwitchMaxSources: Number(e.target.value) || 1,
+          })
+        }
+      />
+      <p className="field-hint">
+        İkisi de sabit bir aralık değil — her seferinde kendi min/max sayıları
+        arasında yeniden rastgele seçilir, hep aynı olmaz. Kullanılamayan
+        (askıya alınmış, kısıtlı, devre dışı) hesaplar rotasyona hiç girmez.
       </p>
       <p className="field-hint">
         Sunucu çökmesi veya Instagram/TikTok kısıtı oluştuğunda

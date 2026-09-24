@@ -347,13 +347,13 @@ async function run(job, controller) {
     };
     // Alternative to rest breaks: rather than pausing, periodically hand
     // off to another configured account and keep going — no stop, so
-    // there's nothing to resume. Checked both between sources (below) and
-    // between profile visits (further down); redrawn after every switch so
-    // the interval is never a predictable fixed cadence. Deliberately NOT
-    // checked mid-hover inside a single source's following-list read —
-    // that's one uninterruptible browser operation with no resumable
-    // cursor, so switching partway would restart it from scratch instead
-    // of continuing.
+    // there's nothing to resume. Deliberately NOT checked mid-hover inside
+    // a single source's following-list read — that's one uninterruptible
+    // browser operation with no resumable cursor, so switching partway
+    // would restart it from scratch instead of continuing.
+    //
+    // Between profile visits (further down): time-based, since visits are
+    // many and fast — a random 20-40ish minute window is a natural cadence.
     const randomSwitchMinutes = () =>
       candidateSettings.accountSwitchMinMinutes +
       Math.random() *
@@ -372,6 +372,35 @@ async function run(job, controller) {
         return null;
       const switched = await instagram.accounts?.rotateNext();
       nextAccountSwitchAt = Date.now() + randomSwitchMinutes() * 60_000;
+      return switched;
+    };
+    // Between sources (below): count-based instead of time-based — one
+    // source's following-list read can take minutes or hours depending on
+    // its size, so a fixed time window ends up switching after wildly
+    // different amounts of actual work. Counting sources keeps "N sources
+    // per account" true regardless of how long any one of them takes.
+    const randomSwitchSources = () =>
+      Math.round(
+        candidateSettings.accountSwitchMinSources +
+          Math.random() *
+            (candidateSettings.accountSwitchMaxSources -
+              candidateSettings.accountSwitchMinSources),
+      );
+    let sourcesLeftOnAccount =
+      platform === 'instagram' && candidateSettings.accountSwitchEnabled
+        ? randomSwitchSources()
+        : Infinity;
+    const maybeRotateAccountForSource = async () => {
+      if (platform !== 'instagram' || !candidateSettings.accountSwitchEnabled)
+        return null;
+      if (sourcesLeftOnAccount > 0) {
+        sourcesLeftOnAccount--;
+        return null;
+      }
+      const switched = await instagram.accounts?.rotateNext();
+      // This source, if the switch actually happened, is the first one on
+      // the new account — don't double count it.
+      sourcesLeftOnAccount = randomSwitchSources() - 1;
       return switched;
     };
     if (resuming) job.message = 'Kalan kullanıcılarla devam ediliyor…';
@@ -407,7 +436,7 @@ async function run(job, controller) {
           );
           break;
         }
-        const rotatedTo = await maybeRotateAccount();
+        const rotatedTo = await maybeRotateAccountForSource();
         job.message = rotatedTo
           ? `Rotasyon: @${rotatedTo.username} hesabına geçildi — @${source} takip listesi açılıyor…`
           : `@${source} takip listesi açılıyor…`;
