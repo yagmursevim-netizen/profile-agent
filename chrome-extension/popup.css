@@ -1,0 +1,50 @@
+body {
+  width: 340px;
+  padding: 20px;
+  margin: 0;
+  font: 14px/1.5 system-ui;
+  color: #26233d;
+  background: #f7f6ff;
+}
+h1 {
+  color: #635bff;
+  margin: 0;
+  font-size: 26px;
+}
+small {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+}
+h2 {
+  font-size: 16px;
+}
+button {
+  background: #635bff;
+  color: white;
+  border: 0;
+  border-radius: 8px;
+  padding: 12px;
+  width: 100%;
+  font: inherit;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+#result {
+  border-top: 1px solid #dedaf2;
+  margin-top: 18px;
+  padding-top: 12px;
+}
+#bio {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow: auto;
+}
+#status {
+  color: #51486f;
+  overflow-wrap: anywhere;
+}

@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Hiwell Partner Studio · TikTok Aktar",
+  "version": "2.2.0",
+  "description": "TikTok following ve arama listelerindeki kullanıcı adlarını Hiwell’e kaydeder. Profilleri uygulama okur.",
+  "permissions": ["activeTab", "scripting"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "TikTok profilini Hiwell'e aktar"
+  },
+  "host_permissions": [
+    "https://www.tiktok.com/*",
+    "https://tiktok.com/*",
+    "http://127.0.0.1/*"
+  ]
+}

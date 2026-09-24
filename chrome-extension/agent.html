@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hiwell TikTok Agent</title>
+    <link rel="stylesheet" href="popup.css" />
+    <link rel="stylesheet" href="agent.css" />
+  </head>
+  <body>
+    <h1>Hiwell <small>TikTok · Kullanıcı listesi toplama</small></h1>
+    <p>
+      Bu ekranı uygulamanın çalıştığı ana bilgisayarda, TikTok’a giriş
+      yaptığınız normal Chrome’da açık tutun.
+    </p>
+    <label for="token">Hiwell → Bağlantılar → TikTok eşleştirme anahtarı</label>
+    <input
+      id="token"
+      type="password"
+      autocomplete="off"
+      placeholder="Eşleştirme anahtarını yapıştırın"
+    />
+    <button id="connect">Agent’ı bağla</button
+    ><button id="stop" disabled>Agent’ı durdur</button>
+    <p id="agent-status" role="status" aria-live="polite">
+      Bağlanmayı bekliyor.
+    </p>
+    <p>
+      Eklenti yalnızca kullanıcı adlarını toplar. Profil ve bio okumaları
+      uygulamanın Playwright penceresinde yapılır. Bağlandıktan sonra Hiwell’den
+      TikTok araması veya hesap listesiyle taramayı kuyruğa ekleyin. Sonuçlar
+      otomatik aktarılır. Tarama sekmesini elle değiştirmeyin. Doğrulama/kısıt
+      çıkarsa iş durur; TikTok’taki uyarıyı kontrol edin.
+    </p>
+    <p>
+      İlk denemede kaynak sınırını 5–10 yapın. Bilgisayarın uykuya geçmesi veya
+      bu ekranın kapanması işi kesebilir; kaydedilen sonuçlar korunur.
+    </p>
+
+    <script src="following.js"></script>
+    <script src="agent.js"></script>
+  </body>
+</html>

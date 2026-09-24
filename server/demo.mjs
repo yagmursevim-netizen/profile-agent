@@ -1,0 +1,77 @@
+import { normalizeProfile } from './domain.mjs';
+export function demoRows() {
+  return [
+    [
+      'ornek.psikoloji',
+      'Örnek Psikoloji',
+      28400,
+      612,
+      false,
+      'Psikoloji üzerine eğitici içerikler.\nİş birliği: psikoloji@example.com',
+      'Uygun aday',
+      'Örnek yorum: Beyan edilen eğitici içerik konusu kampanyayla ilişkili. Etkileşim ve marka uyumu ayrıca incelenmeli.',
+    ],
+    [
+      'ornek.iyi.yasam',
+      'Örnek İyi Yaşam',
+      15300,
+      890,
+      false,
+      'İyi yaşam ve günlük rutinler.\nMerhaba: yasam@example.com',
+      'İncelenmeli',
+      'Örnek yorum: İçerik konusu değerlendirilebilir. Hedef kitle ve geçmiş iş birlikleri bilinmiyor.',
+    ],
+    [
+      'ornek.kampus',
+      'Örnek Kampüs',
+      8200,
+      423,
+      false,
+      'Üniversite yaşamı, öğrenme ve üretkenlik.',
+      'İncelenmeli',
+      'Örnek yorum: Eğitim içerikleri potansiyel uyum gösterebilir. Bio içinde email bulunmuyor.',
+    ],
+    [
+      'ornek.yaratici',
+      'Örnek Yaratıcı',
+      760,
+      1204,
+      false,
+      'Tasarım günlüğü.\nİletişim: tasarim@example.com',
+      'Uygun değil',
+      'Örnek yorum: Takipçi sayısı 1.000 altında; erişim kriteri karşılanmıyor.',
+    ],
+    [
+      'ornek.gunluk',
+      'Örnek Günlük',
+      3200,
+      540,
+      true,
+      'Kişisel günlük.',
+      'İncelenmeli',
+      'Örnek yorum: Hesap kilitli. İçerik ve kampanya uyumu doğrulanamıyor.',
+    ],
+    [
+      'ornek.hareket',
+      'Örnek Hareket',
+      41700,
+      318,
+      false,
+      'Hareket ve yaşam üzerine içerikler.\nİş birlikleri: hareket@example.com',
+      'Uygun aday',
+      'Örnek yorum: Açık hesap, içerik konusu ve iletişim imkanı olumlu sinyaller. İnsan incelemesi gerekir.',
+    ],
+  ].map(
+    ([handle, name, followers, following, locked, bio, verdict, reason]) => ({
+      ...normalizeProfile({
+        username: handle,
+        full_name: name,
+        follower_count: followers,
+        following_count: following,
+        is_private: locked,
+        biography: bio,
+      }),
+      ai: { verdict, reason, model: 'Örnek veri — AI çalıştırılmadı' },
+    }),
+  );
+}

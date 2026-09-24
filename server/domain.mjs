@@ -1,0 +1,228 @@
+import { parse } from 'csv-parse/sync';
+import { profileSignals } from './profile-signals.mjs';
+
+const RESERVED = new Set([
+  'p',
+  'reel',
+  'reels',
+  'stories',
+  'explore',
+  'accounts',
+  'direct',
+  'about',
+  'legal',
+]);
+export function username(value, platform = 'instagram') {
+  let s = String(value ?? '').trim();
+  if (platform === 'tiktok') {
+    if (/^(www\.)?tiktok\.com\//i.test(s)) s = 'https://' + s;
+    if (/^https?:\/\//i.test(s)) {
+      const u = new URL(s);
+      if (
+        !['tiktok.com', 'www.tiktok.com'].includes(u.hostname) ||
+        !/^\/@[^/]+\/?$/.test(u.pathname)
+      )
+        throw new Error(
+          'TikTok profil bağlantısı girin: tiktok.com/@kullaniciadi',
+        );
+      s = u.pathname.slice(1).replace(/\/$/, '');
+    }
+    s = s.replace(/^@/, '').toLowerCase();
+    if (!/^[a-z0-9._]{2,24}$/.test(s) || s.endsWith('.'))
+      throw new Error('Geçersiz TikTok kullanıcı adı.');
+    return s;
+  }
+  if (/^(www\.)?instagram\.com\//i.test(s)) s = 'https://' + s;
+  if (/^https?:\/\//i.test(s)) {
+    const u = new URL(s);
+    if (!['instagram.com', 'www.instagram.com'].includes(u.hostname))
+      throw new Error('Yalnızca Instagram profil bağlantıları kabul edilir.');
+    s = u.pathname.replace(/^\//, '').replace(/\/$/, '');
+  }
+  s = s.replace(/^@/, '').toLowerCase();
+  if (!/^[a-z0-9._]{1,30}$/.test(s) || RESERVED.has(s))
+    throw new Error(`Geçersiz kullanıcı adı: ${s.slice(0, 60)}`);
+  return s;
+}
+export function parseInput(text, csv = false, platform = 'instagram') {
+  let values;
+  if (csv) {
+    const firstLine = text.replace(/^\uFEFF/, '').split(/\r?\n/)[0];
+    const records = parse(text, {
+      bom: true,
+      skip_empty_lines: true,
+      trim: true,
+      delimiter: firstLine.includes(';') ? ';' : ',',
+      relax_column_count: true,
+    });
+    if (!records.length) throw new Error('CSV boş.');
+    const headers = records[0].map((x) =>
+      x.toLocaleLowerCase('tr').replace(/[_\s]/g, ''),
+    );
+    const column = headers.findIndex((x) =>
+      [
+        'username',
+        'kullanıcıadı',
+        'kullaniciadi',
+        'url',
+        'instagram',
+        'tiktok',
+      ].includes(x),
+    );
+    if (column < 0 && records[0].length > 1)
+      throw new Error(
+        'CSV başlığında username, kullanıcı adı veya url sütunu olmalı.',
+      );
+    values = (column >= 0 ? records.slice(1) : records)
+      .map((r) => r[Math.max(column, 0)])
+      .filter(Boolean);
+  } else values = text.split(/[\s,;]+/).filter(Boolean);
+  const result = [...new Set(values.map((value) => username(value, platform)))];
+  if (!result.length) throw new Error('En az bir kullanıcı adı girin.');
+  if (result.length > 500)
+    throw new Error('Bir taramada en fazla 500 kaynak hesap girilebilir.');
+  return result;
+}
+export function emails(bio) {
+  return (
+    [
+      ...new Set(
+        (bio ?? '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [],
+      ),
+    ].join('; ') || null
+  );
+}
+export function exactCount(v) {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
+}
+// Parses a follower/following/post count off Instagram's hover-card text
+// (en-US locale, e.g. "661\nfollowers", "12,345 followers", "1.2K following",
+// "3.4M followers"). Returns null if no count for that label is found.
+export function parseAbbreviatedCount(text, label) {
+  if (typeof text !== 'string') return null;
+  const re = new RegExp(
+    `([\\d,]+(?:\\.\\d+)?)\\s*([KMB])?\\s*[\\s\\n]*${label}`,
+    'i',
+  );
+  const m = text.match(re);
+  if (!m) return null;
+  let n = parseFloat(m[1].replace(/,/g, ''));
+  if (!Number.isFinite(n)) return null;
+  const suffix = (m[2] || '').toUpperCase();
+  if (suffix === 'K') n *= 1_000;
+  else if (suffix === 'M') n *= 1_000_000;
+  else if (suffix === 'B') n *= 1_000_000_000;
+  return exactCount(Math.round(n));
+}
+export function cleanUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const u = new URL(value.trim());
+    return ['http:', 'https:'].includes(u.protocol) ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+export function pickUrl(links) {
+  if (!Array.isArray(links)) return null;
+  for (const link of links) {
+    const url = cleanUrl(link?.url);
+    if (url) return url;
+  }
+  return null;
+}
+export function normalizeProfile(p) {
+  const bio = typeof p.biography === 'string' ? p.biography : null;
+  return {
+    username: username(p.username),
+    email: emails(bio),
+    followers: exactCount(p.follower_count ?? p.edge_followed_by?.count),
+    following: exactCount(p.following_count ?? p.edge_follow?.count),
+    private: typeof p.is_private === 'boolean' ? p.is_private : null,
+    photoUrl: cleanUrl(p.profile_pic_url_hd ?? p.profile_pic_url) ?? null,
+    bio,
+    ...profileSignals(bio),
+    externalUrl: pickUrl(p.bio_links) ?? cleanUrl(p.external_url) ?? null,
+    bioLinks: Array.isArray(p.bio_links)
+      ? [...new Set(p.bio_links.map((l) => cleanUrl(l?.url)).filter(Boolean))]
+      : null,
+    isBusiness: typeof p.is_business === 'boolean' ? p.is_business : null,
+    category: p.category ?? null,
+    accountType: p.account_type ?? null,
+    hasBusinessAddress: Boolean(p.address_street || p.city_name || p.zip),
+    fullName: p.full_name || '',
+    collectedAt: new Date().toISOString(),
+    ai: null,
+    error: null,
+  };
+}
+export { selectProfiles as filterRows } from '../lib/profile-list.mjs';
+export const HEADERS = [
+  'Kullanıcı adı',
+  'Email',
+  'Takipçi sayısı',
+  'Takip ettiği kişi sayısı',
+  'Hesap durumu',
+  'Bio tam metin',
+  'İş birliği değerlendirmesi',
+  'İş birliği iletişimi',
+  'Bio dili',
+  'Dil tespiti dayanağı',
+  'Cinsiyet (açık beyan)',
+  'Cinsiyet beyanı',
+  'Platform',
+  'Bio kaynağı',
+  'Bio bağlantısı',
+  'Arama özeti (doğrulanmadı)',
+  'Arama kaynağı URL',
+];
+export function rowValues(r) {
+  return [
+    r.username,
+    r.email,
+    r.followers,
+    r.following,
+    r.private === null ? 'Bilinmiyor' : r.private ? 'Kilitli' : 'Açık',
+    r.bio,
+    r.ai
+      ? `${r.ai.verdict}: ${r.ai.reason}`
+      : r.error
+        ? `Veri alınamadı: ${r.error}`
+        : 'Değerlendirilmedi',
+    r.dmForCollaboration
+      ? `İş birliği için DM: ${r.dmEvidence}`
+      : 'DM beyanı yok',
+    r.language || 'Bilinmiyor',
+    r.languageEvidence || 'Tespit edilemedi',
+    r.gender || 'Bilinmiyor',
+    r.genderEvidence || 'Açık beyan yok',
+    r.platform === 'tiktok' ? 'TikTok' : 'Instagram',
+    r.bioSource || null,
+    r.bioLink || null,
+    r.searchEvidence?.text || null,
+    r.searchEvidence?.url || null,
+  ];
+}
+export function csvCell(value) {
+  let s = value === null || value === undefined ? 'null' : String(value);
+  if (/^[\s]*[=+@-]/.test(s) || /^[\t\r\n]/.test(s)) s = `'${s}`;
+  return `"${s.replaceAll('"', '""')}"`;
+}
+
+export function sourceLimitWarnings(
+  handle,
+  followers,
+  following,
+  limit = 5000,
+) {
+  const notes = [];
+  if (typeof followers === 'number' && followers > 5000)
+    notes.push(
+      `@${handle}: ${followers.toLocaleString('tr-TR')} takipçisi var (5.000 üzerinde). Tarama takip ettiği hesaplar listesini inceler.`,
+    );
+  if (typeof following === 'number' && following > limit)
+    notes.push(
+      `@${handle}: ${following.toLocaleString('tr-TR')} hesap takip ediyor; en fazla ${limit.toLocaleString('tr-TR')} hesap alınacak.`,
+    );
+  return notes;
+}
