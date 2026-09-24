@@ -606,12 +606,145 @@ async function run(job, controller) {
       job.remainingUsers = [...targets];
       job.total = job.done + targets.size;
     };
+    // Each run() start (fresh or resumed) is already a natural gap, so the
+    // clock for the next rest break starts here rather than being persisted
+    // across runs.
+    let lastBreakAt = Date.now();
+    // Visits whatever is currently pending in `targets`, removing each
+    // handle once processed. In 'following' mode this is called once per
+    // source (right after that source's following list is read and
+    // filtered) so a source's candidates are fully visited before the next
+    // source's list is even opened, instead of hovering every source first
+    // and only visiting profiles afterward in one long, disconnected pass.
+    // It's also called once more at the very end as a catch-all — for
+    // 'search'/'profiles'/'candidates' modes (which never call it mid-loop)
+    // and for any leftover resumed targets not tied to a source still
+    // being read.
+    const visitPending = async () => {
+      for (const handle of [...targets]) {
+        signal.throwIfAborted();
+        if (
+          candidateSettings.restBreakEnabled &&
+          Date.now() - lastBreakAt >=
+            candidateSettings.restBreakEveryMinutes * 60_000
+        ) {
+          const mins = candidateSettings.restBreakDurationMinutes;
+          job.message = `Dinlenme molası (${mins} dk) — sonra @${handle} ile devam edilecek…`;
+          await save();
+          await delay(mins * 60_000, null, { signal });
+          lastBreakAt = Date.now();
+        }
+        const rotatedTo = await maybeRotateAccount();
+        job.message = rotatedTo
+          ? `Rotasyon: @${rotatedTo.username} hesabına geçildi — @${handle} inceleniyor (${job.done + 1}/${job.total})`
+          : `@${handle} inceleniyor (${job.done + 1}/${job.total})`;
+        const forced = job.forceRescan?.includes(handle.toLowerCase());
+        let row;
+        try {
+          row = forced
+            ? null
+            : cachedProfile(
+                jobs.filter((j) => j.id !== job.id),
+                handle,
+                platform,
+              );
+          if (row) job.cachedCount++;
+          else if (job.candidates?.[handle.toLowerCase()]?.private === true) {
+            row = {
+              username: handle,
+              email: null,
+              followers: null,
+              following: null,
+              private: true,
+              bio: null,
+              ai: null,
+              error:
+                'Takip listesinden gizli hesap olarak tespit edildi; profil ziyaret edilmedi.',
+              collectedAt: new Date().toISOString(),
+              reused: true,
+            };
+          } else {
+            await ensureLogin();
+            row = await collector.profile(handle, signal);
+          }
+          if (job.model) {
+            try {
+              row.ai = await assess(row, job.model, signal);
+            } catch (e) {
+              if (signal.aborted) throw e;
+              row.aiError = e.message;
+            }
+          } else if (
+            candidateSettings.autoAssess &&
+            (row.email || row.dmForCollaboration) &&
+            (job.autoAssessedCount || 0) < candidateSettings.autoAssessLimit
+          ) {
+            // Bağlantılar → "Otomatik AI değerlendirmesi": profiles with an
+            // email or DM-collaboration signal get their suitability verdict
+            // right here instead of needing a separate manual pass afterward.
+            // Capped per job so an unattended multi-account run can't rack up
+            // unbounded OpenAI spend/time.
+            try {
+              row.ai = await assess(row, candidateSettings, signal);
+              job.autoAssessedCount = (job.autoAssessedCount || 0) + 1;
+            } catch (e) {
+              if (signal.aborted) throw e;
+              row.aiError = e.message;
+            }
+          }
+        } catch (e) {
+          if (platform === 'tiktok') e.blocked = true;
+          if (!signal.aborted && e.partialProfile) {
+            job.rows = job.rows.filter((r) => r.username !== handle);
+            job.rows.push(e.partialProfile);
+            await save();
+          }
+          if (signal.aborted || e.blocked) throw e;
+          row = {
+            username: handle,
+            email: null,
+            followers: null,
+            following: null,
+            private: null,
+            bio: null,
+            ai: null,
+            error: e.message,
+            collectedAt: new Date().toISOString(),
+          };
+        }
+        if (['profiles', 'candidates'].includes(job.mode))
+          job.warnings.push(
+            ...sourceLimitWarnings(handle, row.followers, null, job.limit),
+          );
+        if (
+          typeof row.followers === 'number' &&
+          row.followers > candidateSettings.fameFollowerThreshold
+        )
+          // Informational only — the profile was read successfully, this just
+          // flags it as over the fame threshold. Kept off row.error so it
+          // doesn't look like a failed read or push the job into "partial".
+          row.note = `${candidateSettings.fameFollowerThreshold.toLocaleString('tr-TR')}+ takipçili (ünlü olarak değerlendirildi).`;
+        row.platform = platform;
+        job.rows = job.rows.filter((r) => r.username !== handle);
+        job.rows.push(row);
+        job.done++;
+        targets.delete(handle);
+        job.remainingUsers = job.remainingUsers.filter((h) => h !== handle);
+        await save();
+        if (!row.reused && job.done < job.total)
+          // Randomized instead of a fixed interval so the pacing between
+          // profile visits doesn't look like a mechanically regular script.
+          await delay(3000 + Math.floor(Math.random() * 5000), null, {
+            signal,
+          });
+      }
+    };
     if (job.mode === 'search') {
       for (const term of job.sources) {
         if (sourcesDone.has(term)) continue;
         if (job.skipRemainingDiscovery) break;
         signal.throwIfAborted();
-        if (targets.size >= 5000) break;
+        if ((job.discoveredUsers?.length || 0) >= 5000) break;
         job.message = 'TikTok araması: ' + term;
         await save();
         const result = await tiktokBridge.search(
@@ -636,7 +769,7 @@ async function run(job, controller) {
         if (sourcesDone.has(source)) continue;
         if (job.skipRemainingDiscovery) break;
         signal.throwIfAborted();
-        if (targets.size >= 5000) {
+        if ((job.discoveredUsers?.length || 0) >= 5000) {
           job.warnings.push(
             'Toplam 5.000 farklı hesap sınırına ulaşıldı; kalan kaynaklar açılmadı.',
           );
@@ -703,13 +836,22 @@ async function run(job, controller) {
           addDiscovered(targets);
           persistTargets();
           await save();
-          if (targets.size >= 5000 && job.sources.length > 1)
+          if (
+            (job.discoveredUsers?.length || 0) >= 5000 &&
+            job.sources.length > 1
+          )
             job.warnings.push(
               'Bu taramada toplam en fazla 5.000 farklı profil incelenir.',
             );
           if (result.warning) job.warnings.push(result.warning);
           sourcesDone.add(source);
           job.sourcesDone = [...sourcesDone];
+          // Fully visit this source's newly discovered candidates (plus
+          // anything still pending from before) before opening the next
+          // source's following list — one source finishes start-to-finish
+          // instead of every source being hovered first and profiles only
+          // getting visited afterward in one long, disconnected pass.
+          await visitPending();
         } catch (e) {
           if (signal.aborted || e.blocked) throw e;
           job.warnings.push(`@${source}: ${e.message}`);
@@ -755,132 +897,18 @@ async function run(job, controller) {
     // problem worth erroring on — for 'candidates', every submitted handle
     // legitimately being filtered out (fame/private/title/min-follower/
     // excluded-list) is a normal, successful outcome, not a read failure.
-    if (!targets.size && ['following', 'search'].includes(job.mode))
+    // Checked against discoveredUsers (the running total ever found), not
+    // targets.size — in 'following' mode targets is drained by
+    // visitPending() as each source finishes, so by the time every source
+    // is done it can legitimately be empty even though plenty was found
+    // and visited.
+    if (!job.discoveredUsers?.length && ['following', 'search'].includes(job.mode))
       throw new Error(
         job.warnings.length
           ? `Takip listesi alınamadı. ${job.warnings[0]}`
           : 'Takip listesi boş; incelenecek hesap bulunamadı.',
       );
-    // Each run() start (fresh or resumed) is already a natural gap, so the
-    // clock for the next rest break starts here rather than being persisted
-    // across runs.
-    let lastBreakAt = Date.now();
-    for (const handle of targets) {
-      signal.throwIfAborted();
-      if (
-        candidateSettings.restBreakEnabled &&
-        Date.now() - lastBreakAt >=
-          candidateSettings.restBreakEveryMinutes * 60_000
-      ) {
-        const mins = candidateSettings.restBreakDurationMinutes;
-        job.message = `Dinlenme molası (${mins} dk) — sonra @${handle} ile devam edilecek…`;
-        await save();
-        await delay(mins * 60_000, null, { signal });
-        lastBreakAt = Date.now();
-      }
-      const rotatedTo = await maybeRotateAccount();
-      job.message = rotatedTo
-        ? `Rotasyon: @${rotatedTo.username} hesabına geçildi — @${handle} inceleniyor (${job.done + 1}/${job.total})`
-        : `@${handle} inceleniyor (${job.done + 1}/${job.total})`;
-      const forced = job.forceRescan?.includes(handle.toLowerCase());
-      let row;
-      try {
-        row = forced
-          ? null
-          : cachedProfile(
-              jobs.filter((j) => j.id !== job.id),
-              handle,
-              platform,
-            );
-        if (row) job.cachedCount++;
-        else if (job.candidates?.[handle.toLowerCase()]?.private === true) {
-          row = {
-            username: handle,
-            email: null,
-            followers: null,
-            following: null,
-            private: true,
-            bio: null,
-            ai: null,
-            error:
-              'Takip listesinden gizli hesap olarak tespit edildi; profil ziyaret edilmedi.',
-            collectedAt: new Date().toISOString(),
-            reused: true,
-          };
-        } else {
-          await ensureLogin();
-          row = await collector.profile(handle, signal);
-        }
-        if (job.model) {
-          try {
-            row.ai = await assess(row, job.model, signal);
-          } catch (e) {
-            if (signal.aborted) throw e;
-            row.aiError = e.message;
-          }
-        } else if (
-          candidateSettings.autoAssess &&
-          (row.email || row.dmForCollaboration) &&
-          (job.autoAssessedCount || 0) < candidateSettings.autoAssessLimit
-        ) {
-          // Bağlantılar → "Otomatik AI değerlendirmesi": profiles with an
-          // email or DM-collaboration signal get their suitability verdict
-          // right here instead of needing a separate manual pass afterward.
-          // Capped per job so an unattended multi-account run can't rack up
-          // unbounded OpenAI spend/time.
-          try {
-            row.ai = await assess(row, candidateSettings, signal);
-            job.autoAssessedCount = (job.autoAssessedCount || 0) + 1;
-          } catch (e) {
-            if (signal.aborted) throw e;
-            row.aiError = e.message;
-          }
-        }
-      } catch (e) {
-        if (platform === 'tiktok') e.blocked = true;
-        if (!signal.aborted && e.partialProfile) {
-          job.rows = job.rows.filter((r) => r.username !== handle);
-          job.rows.push(e.partialProfile);
-          await save();
-        }
-        if (signal.aborted || e.blocked) throw e;
-        row = {
-          username: handle,
-          email: null,
-          followers: null,
-          following: null,
-          private: null,
-          bio: null,
-          ai: null,
-          error: e.message,
-          collectedAt: new Date().toISOString(),
-        };
-      }
-      if (['profiles', 'candidates'].includes(job.mode))
-        job.warnings.push(
-          ...sourceLimitWarnings(handle, row.followers, null, job.limit),
-        );
-      if (
-        typeof row.followers === 'number' &&
-        row.followers > candidateSettings.fameFollowerThreshold
-      )
-        // Informational only — the profile was read successfully, this just
-        // flags it as over the fame threshold. Kept off row.error so it
-        // doesn't look like a failed read or push the job into "partial".
-        row.note = `${candidateSettings.fameFollowerThreshold.toLocaleString('tr-TR')}+ takipçili (ünlü olarak değerlendirildi).`;
-      row.platform = platform;
-      job.rows = job.rows.filter((r) => r.username !== handle);
-      job.rows.push(row);
-      job.done++;
-      job.remainingUsers = job.remainingUsers.filter((h) => h !== handle);
-      await save();
-      if (!row.reused && job.done < job.total)
-        // Randomized instead of a fixed interval so the pacing between
-        // profile visits doesn't look like a mechanically regular script.
-        await delay(3000 + Math.floor(Math.random() * 5000), null, {
-          signal,
-        });
-    }
+    await visitPending();
     // Warnings (following-list truncation, follower-count notes, etc.) stay
     // visible in "Tarama notları" regardless — they no longer downgrade the
     // headline status, which now reflects actual per-profile read failures
