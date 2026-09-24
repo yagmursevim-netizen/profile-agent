@@ -107,7 +107,7 @@ void test('source limits distinguish follower warning and following truncation a
   assert.equal(sourceLimitWarnings('source', null, null).length, 0);
   const warnings = sourceLimitWarnings('source', 5001, 6000);
   assert.equal(warnings.length, 2);
-  assert.match(warnings[0], /5.001 takipçisi/);
+  assert.equal(warnings[0], '@source (5.001 takipçi)');
   assert.match(warnings[1], /6.000 hesap takip/);
 });
 void test('parseAbbreviatedCount reads exact, comma and K/M/B follower counts from hover-card text', () => {

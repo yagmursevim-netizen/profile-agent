@@ -112,6 +112,8 @@ const excludedFilterLabels: Record<string, string> = {
 type Job = {
   id: string;
   sources: string[];
+  sourcesDone?: string[];
+  sourceLists?: Record<string, { followers?: number | null }>;
   discoveredUsers?: string[];
   excludedCandidates?: Record<string, ExcludedCandidate>;
   platform?: string;
@@ -211,6 +213,50 @@ function Choice({
         ))}
       </SelectContent>
     </Select>
+  );
+}
+// Sources are processed strictly in job.sources order (see run() in
+// index.mjs), so the first one not yet in sourcesDone is exactly the one
+// currently being read — no separate "current source" field needed.
+function SourceProgress({ job }: { job: Job }) {
+  const done = new Set(job.sourcesDone ?? []);
+  const doneList = job.sources.filter((s) => done.has(s));
+  const remaining = job.sources.filter((s) => !done.has(s));
+  const [current, ...upcoming] = remaining;
+  const followerCount = (s: string) => job.sourceLists?.[s]?.followers;
+  return (
+    <div className="source-progress">
+      {doneList.length > 0 && (
+        <div className="source-group">
+          <span className="source-group-label">
+            Tamamlanan ({doneList.length})
+          </span>
+          {doneList.map((s) => (
+            <span key={s} className="source-chip done">
+              @{s}
+              {typeof followerCount(s) === 'number' &&
+                ` (${followerCount(s)!.toLocaleString('tr-TR')} takipçi)`}
+            </span>
+          ))}
+        </div>
+      )}
+      {current && (
+        <div className="source-group">
+          <span className="source-group-label">Şu an</span>
+          <span className="source-chip current">@{current}</span>
+        </div>
+      )}
+      {upcoming.length > 0 && (
+        <div className="source-group">
+          <span className="source-group-label">Sırada ({upcoming.length})</span>
+          {upcoming.map((s) => (
+            <span key={s} className="source-chip upcoming">
+              @{s}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 export default function Home() {
@@ -1281,7 +1327,6 @@ function Workspace({
                     {job.warnings
                       .filter(
                         (w) =>
-                          w.includes('takipçisi var') ||
                           w.includes('hesap takip ediyor') ||
                           w.includes('5.000 farklı'),
                       )
@@ -1319,6 +1364,9 @@ function Workspace({
                       value={job.total ? (job.done / job.total) * 100 : 0}
                       className="h-1 mt-3"
                     />
+                  )}
+                  {job.mode === 'following' && job.sources.length > 1 && (
+                    <SourceProgress job={job} />
                   )}
                 </div>
               )}

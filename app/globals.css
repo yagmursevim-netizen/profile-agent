@@ -1020,6 +1020,43 @@ div[data-slot='table-container']:has(.profile-table) {
   margin-left: auto;
   font-size: 12px;
 }
+.source-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+.source-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.source-group-label {
+  font-weight: 600;
+  color: #4b4677;
+  flex-shrink: 0;
+}
+.source-chip {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.source-chip.done {
+  background: #eef6ec;
+  color: #4f7a4a;
+}
+.source-chip.current {
+  background: #e4e2f7;
+  color: #3c357e;
+  font-weight: 600;
+}
+.source-chip.upcoming {
+  background: #eceaf5;
+  color: #8581a4;
+}
 .job-state {
   display: flex;
   align-items: center;

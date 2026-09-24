@@ -301,10 +301,11 @@ export function sourceLimitWarnings(
   limit = 5000,
 ) {
   const notes = [];
+  // The scan reads who this source *follows*, not their own follower count
+  // — that count is only worth a quick parenthetical, not a full sentence
+  // repeated once per large source.
   if (typeof followers === 'number' && followers > 5000)
-    notes.push(
-      `@${handle}: ${followers.toLocaleString('tr-TR')} takipçisi var (5.000 üzerinde). Tarama takip ettiği hesaplar listesini inceler.`,
-    );
+    notes.push(`@${handle} (${followers.toLocaleString('tr-TR')} takipçi)`);
   if (typeof following === 'number' && following > limit)
     notes.push(
       `@${handle}: ${following.toLocaleString('tr-TR')} hesap takip ediyor; en fazla ${limit.toLocaleString('tr-TR')} hesap alınacak.`,
