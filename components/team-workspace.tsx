@@ -344,11 +344,17 @@ export function TeamWorkspace({
           <Table>
             <TableHeader>
               <TableRow>
-                {['Sıra', 'Kullanıcı', 'İş', 'Platform', 'Durum', 'İşlem'].map(
-                  (h) => (
-                    <TableHead key={h}>{h}</TableHead>
-                  ),
-                )}
+                {[
+                  'Sıra',
+                  'Kullanıcı',
+                  'İş',
+                  'Platform',
+                  'Tarih',
+                  'Durum',
+                  'İşlem',
+                ].map((h) => (
+                  <TableHead key={h}>{h}</TableHead>
+                ))}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -366,13 +372,13 @@ export function TeamWorkspace({
                         ? 'AI'
                         : 'Email'}{' '}
                     · {t.title}
-                    <small>
-                      {new Date(t.createdAt).toLocaleString('tr-TR')}
-                    </small>
                   </TableCell>
                   <TableCell>
                     {t.platforms?.map(platformLabel).join(' + ') ||
                       platformLabel(t.platform)}
+                  </TableCell>
+                  <TableCell>
+                    {new Date(t.createdAt).toLocaleString('tr-TR')}
                   </TableCell>
                   <TableCell>
                     {labels[t.status] || t.status}
