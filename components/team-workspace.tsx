@@ -17,6 +17,14 @@ import {
   TableBody,
   TableCell,
 } from '@/components/ui/table';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
 import type { AppUser } from './auth-shell';
 
 type JobSummary = {
@@ -28,6 +36,25 @@ type JobSummary = {
   createdAt: string;
   platform?: string;
   demo?: boolean;
+};
+type ExportRow = {
+  username: string;
+  platform?: string;
+  fullName?: string;
+  email: string | null;
+  followers: number | null;
+  language?: string;
+  ai: { verdict: string; reason: string } | null;
+  sourceLabel: string;
+};
+const rowKey = (r: ExportRow) => `${r.platform || 'instagram'}:${r.username.toLowerCase()}`;
+// Mirrors server/domain.mjs's csvCell — same spreadsheet-formula-injection
+// neutralization, since this file also produces a CSV a spreadsheet app
+// will open directly.
+const csvCell = (value: string | number | null | undefined) => {
+  let s = value === null || value === undefined ? 'null' : String(value);
+  if (/^[\s]*[=+@-]/.test(s) || /^[\t\r\n]/.test(s)) s = `'${s}`;
+  return `"${s.replaceAll('"', '""')}"`;
 };
 type Task = {
   id: string;
@@ -87,6 +114,57 @@ const platformLabel = (p: string) =>
       : p === 'mixed'
         ? 'Email'
         : 'Instagram';
+
+// Excel's AutoFilter, simplified: a column header opens a checkbox list of
+// every distinct value in that column. `selected: null` means no filter is
+// active (everything shown, every box checked) — the same state Excel
+// starts a column in before you touch its dropdown.
+function ColumnFilter({
+  label,
+  values,
+  selected,
+  onChange,
+}: {
+  label: string;
+  values: string[];
+  selected: Set<string> | null;
+  onChange: (next: Set<string> | null) => void;
+}) {
+  const active = selected ?? new Set(values);
+  return (
+    <details className="column-filter">
+      <summary>
+        {label}
+        {selected && <span className="column-filter-count"> ({selected.size})</span>}
+      </summary>
+      <div className="column-filter-menu">
+        <div className="column-filter-actions">
+          <button type="button" onClick={() => onChange(null)}>
+            Tümünü seç
+          </button>
+          <button type="button" onClick={() => onChange(new Set())}>
+            Temizle
+          </button>
+        </div>
+        {values.map((v) => (
+          <label key={v} className="column-filter-option">
+            <input
+              type="checkbox"
+              checked={active.has(v)}
+              onChange={(e) => {
+                const next = new Set(active);
+                if (e.target.checked) next.add(v);
+                else next.delete(v);
+                onChange(next.size === values.length ? null : next);
+              }}
+            />
+            {v}
+          </label>
+        ))}
+      </div>
+    </details>
+  );
+}
 
 export function TeamWorkspace({
   user,
@@ -154,6 +232,89 @@ export function TeamWorkspace({
     setExportJobIds((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [sheetLoading, setSheetLoading] = useState(false);
+  const [sheetError, setSheetError] = useState('');
+  const [sheetRows, setSheetRows] = useState<ExportRow[]>([]);
+  const [includedKeys, setIncludedKeys] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState('');
+  // null = no filter (every value shown); once opened, a column filter holds
+  // exactly the values still checked — same as Excel's AutoFilter dropdowns.
+  const [colFilters, setColFilters] = useState<{
+    platform: Set<string> | null;
+    emailStatus: Set<string> | null;
+    verdict: Set<string> | null;
+    language: Set<string> | null;
+  }>({ platform: null, emailStatus: null, verdict: null, language: null });
+  const openSheet = async () => {
+    setSheetOpen(true);
+    setSheetLoading(true);
+    setSheetError('');
+    setSearch('');
+    setColFilters({
+      platform: null,
+      emailStatus: null,
+      verdict: null,
+      language: null,
+    });
+    try {
+      const res = await fetch(
+        `/api/export-rows?jobIds=${exportJobIds.join(',')}`,
+      );
+      if (!res.ok) throw new Error('Satırlar yüklenemedi.');
+      const data = (await res.json()) as { rows: ExportRow[] };
+      setSheetRows(data.rows);
+      setIncludedKeys(new Set(data.rows.map(rowKey)));
+    } catch (e) {
+      setSheetError((e as Error).message);
+    } finally {
+      setSheetLoading(false);
+    }
+  };
+  const emailStatusOf = (r: ExportRow) => (r.email ? 'Var' : 'Yok');
+  const verdictOf = (r: ExportRow) => r.ai?.verdict || 'Değerlendirilmedi';
+  const languageOf = (r: ExportRow) => r.language || 'Bilinmiyor';
+  const matchesFilters = (r: ExportRow) => {
+    const q = search.trim().toLowerCase();
+    if (
+      q &&
+      !`${r.username} ${r.fullName || ''} ${r.email || ''} ${r.sourceLabel}`
+        .toLowerCase()
+        .includes(q)
+    )
+      return false;
+    if (colFilters.platform && !colFilters.platform.has(r.platform || 'instagram'))
+      return false;
+    if (colFilters.emailStatus && !colFilters.emailStatus.has(emailStatusOf(r)))
+      return false;
+    if (colFilters.verdict && !colFilters.verdict.has(verdictOf(r)))
+      return false;
+    if (colFilters.language && !colFilters.language.has(languageOf(r)))
+      return false;
+    return true;
+  };
+  const filteredSheetRows = sheetRows.filter(matchesFilters);
+  const finalRows = filteredSheetRows.filter((r) => includedKeys.has(rowKey(r)));
+  const downloadImportCsv = () => {
+    const lines = [
+      ['email', 'name', 'username', 'platform'],
+      ...finalRows.map((r) => [
+        r.email || '',
+        r.fullName || '',
+        r.username,
+        r.platform || 'instagram',
+      ]),
+    ];
+    const csv =
+      '﻿' + lines.map((line) => line.map(csvCell).join(',')).join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'import.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   const visible = rows.filter(
     (r) =>
       (person === 'all' || r.userId === person) &&
@@ -323,21 +484,186 @@ export function TeamWorkspace({
             </TableBody>
           </Table>
           {!jobs.length && <p className="field-hint">Henüz tarama yok.</p>}
-          {exportJobIds.length ? (
-            <a
-              className="button-link"
-              href={`/api/export-all?jobIds=${exportJobIds.join(',')}`}
-              download="hiwell-secili-taramalar.xlsx"
+          <div className="bulk-toolbar">
+            {exportJobIds.length ? (
+              <a
+                className="button-link"
+                href={`/api/export-all?jobIds=${exportJobIds.join(',')}`}
+                download="hiwell-secili-taramalar.xlsx"
+              >
+                Excel olarak indir ({exportJobIds.length} tarama)
+              </a>
+            ) : (
+              <span className="button-link disabled">
+                Excel olarak indir — önce tarama seç
+              </span>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!exportJobIds.length}
+              onClick={() => void openSheet()}
             >
-              Excel olarak indir ({exportJobIds.length} tarama)
-            </a>
-          ) : (
-            <span className="button-link disabled">
-              Excel olarak indir — önce tarama seç
-            </span>
-          )}
+              Filtrele ve içe aktarım formatında indir
+            </Button>
+          </div>
         </div>
       )}
+      <Dialog open={sheetOpen} onOpenChange={setSheetOpen}>
+        <DialogContent className="export-sheet-dialog sm:max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Seçilenleri filtrele</DialogTitle>
+          </DialogHeader>
+          {sheetError && (
+            <p className="notice error" role="alert">
+              {sheetError}
+            </p>
+          )}
+          {sheetLoading ? (
+            <p className="field-hint">Yükleniyor…</p>
+          ) : (
+            <>
+              <div className="bulk-toolbar">
+                <Input
+                  placeholder="Kullanıcı adı, isim, email veya kaynakta ara…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() =>
+                    setIncludedKeys(
+                      (prev) =>
+                        new Set([
+                          ...prev,
+                          ...filteredSheetRows.map(rowKey),
+                        ]),
+                    )
+                  }
+                >
+                  Görünenleri seç
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() =>
+                    setIncludedKeys((prev) => {
+                      const next = new Set(prev);
+                      for (const r of filteredSheetRows) next.delete(rowKey(r));
+                      return next;
+                    })
+                  }
+                >
+                  Görünenleri kaldır
+                </Button>
+                <span>
+                  {finalRows.length} / {sheetRows.length} satır seçili
+                </span>
+              </div>
+              <div className="export-sheet-table">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead />
+                      <TableHead>Kullanıcı adı</TableHead>
+                      <TableHead>İsim</TableHead>
+                      <TableHead>Email</TableHead>
+                      <TableHead>
+                        <ColumnFilter
+                          label="Platform"
+                          values={[
+                            ...new Set(
+                              sheetRows.map((r) => r.platform || 'instagram'),
+                            ),
+                          ]}
+                          selected={colFilters.platform}
+                          onChange={(v) =>
+                            setColFilters((p) => ({ ...p, platform: v }))
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <ColumnFilter
+                          label="Email durumu"
+                          values={[...new Set(sheetRows.map(emailStatusOf))]}
+                          selected={colFilters.emailStatus}
+                          onChange={(v) =>
+                            setColFilters((p) => ({ ...p, emailStatus: v }))
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <ColumnFilter
+                          label="AI değerlendirmesi"
+                          values={[...new Set(sheetRows.map(verdictOf))]}
+                          selected={colFilters.verdict}
+                          onChange={(v) =>
+                            setColFilters((p) => ({ ...p, verdict: v }))
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <ColumnFilter
+                          label="Dil"
+                          values={[...new Set(sheetRows.map(languageOf))]}
+                          selected={colFilters.language}
+                          onChange={(v) =>
+                            setColFilters((p) => ({ ...p, language: v }))
+                          }
+                        />
+                      </TableHead>
+                      <TableHead>Kaynak</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredSheetRows.map((r) => {
+                      const key = rowKey(r);
+                      return (
+                        <TableRow key={key}>
+                          <TableCell>
+                            <Checkbox
+                              aria-label={`${r.username} satırını dahil et`}
+                              checked={includedKeys.has(key)}
+                              onCheckedChange={() =>
+                                setIncludedKeys((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(key)) next.delete(key);
+                                  else next.add(key);
+                                  return next;
+                                })
+                              }
+                            />
+                          </TableCell>
+                          <TableCell>{r.username}</TableCell>
+                          <TableCell>{r.fullName || ''}</TableCell>
+                          <TableCell>{r.email || ''}</TableCell>
+                          <TableCell>{platformLabel(r.platform || 'instagram')}</TableCell>
+                          <TableCell>{emailStatusOf(r)}</TableCell>
+                          <TableCell>{verdictOf(r)}</TableCell>
+                          <TableCell>{languageOf(r)}</TableCell>
+                          <TableCell>{r.sourceLabel}</TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+                {!filteredSheetRows.length && (
+                  <p className="field-hint">Bu filtrelerle eşleşen satır yok.</p>
+                )}
+              </div>
+            </>
+          )}
+          <DialogFooter>
+            <Button
+              disabled={!finalRows.length}
+              onClick={downloadImportCsv}
+            >
+              İçe aktarım formatında indir ({finalRows.length})
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {view === 'log' && (
         <div className="panel sender-panel">
           <h3>Kuyruk ve son işler</h3>

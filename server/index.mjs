@@ -148,6 +148,51 @@ const MARKETS = [
 // Checking remainingUsers alone missed that case entirely: a restriction
 // hit early enough (before the first source finished reading) left a job
 // with no "Devam et" option and no way to continue short of a full re-scan.
+// Shared by /api/export-all (Excel) and /api/export-rows (JSON, for the
+// in-browser filter/curate screen before a final import-format download) —
+// same dedup rules either way: every profile collected across the selected
+// scans, deduped by platform+username keeping the most recently collected
+// copy, and every candidate excluded pre-visit in those same scans, deduped
+// the same way.
+function collectExportRows(jobIds) {
+  // Strictly scoped to the scans the caller picked — no implicit "export
+  // everything" fallback, so an empty/missing selection is refused rather
+  // than silently aggregating every job ever run.
+  if (!jobIds.length)
+    throw new Error('Dışa aktarmak için en az bir tarama seçin.');
+  const selectedJobs = jobs.filter((j) => jobIds.includes(j.id));
+  if (!selectedJobs.length) throw new Error('Seçilen taramalar bulunamadı.');
+  // Which single source account (within a job that may read several)
+  // actually turned up this username — following-mode jobs record each
+  // source's own discovered list in sourceLists, so this is precise rather
+  // than just naming every source the job had.
+  const sourceFor = (j, username) => {
+    if (j.mode === 'following' && j.sourceLists) {
+      for (const [source, list] of Object.entries(j.sourceLists))
+        if (list.users?.some((u) => u.toLowerCase() === username.toLowerCase()))
+          return `@${source}`;
+    }
+    return j.sources.join(', ');
+  };
+  const rowsByKey = new Map();
+  const excludedByKey = new Map();
+  for (const j of selectedJobs) {
+    if (j.demo) continue;
+    for (const row of j.rows) {
+      const key = `${row.platform || j.platform || 'instagram'}:${row.username.toLowerCase()}`;
+      const prior = rowsByKey.get(key);
+      if (
+        !prior ||
+        (Date.parse(row.collectedAt) || 0) > (Date.parse(prior.collectedAt) || 0)
+      )
+        rowsByKey.set(key, { ...row, sourceLabel: sourceFor(j, row.username) });
+    }
+    for (const [key, c] of Object.entries(j.excludedCandidates || {}))
+      if (!excludedByKey.has(key))
+        excludedByKey.set(key, { ...c, sourceLabel: sourceFor(j, c.username) });
+  }
+  return { rows: [...rowsByKey.values()], excluded: [...excludedByKey.values()] };
+}
 function hasResumableWork(job) {
   if (job.remainingUsers?.length) return true;
   if (['following', 'search'].includes(job.mode)) {
@@ -1752,23 +1797,19 @@ const server = http.createServer(async (req, res) => {
         200,
         jobs.map(({ rows, ...j }) => ({ ...j, count: rows.length })),
       );
-    if (req.method === 'GET' && route === '/api/export-all') {
-      // Strictly scoped to the scans the user picked — no implicit "export
-      // everything" fallback, so an empty/missing selection is refused
-      // rather than silently aggregating every job ever run.
-      const jobIds = (url.searchParams.get('jobIds') || '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (!jobIds.length)
-        throw new Error('Dışa aktarmak için en az bir tarama seçin.');
-      const selectedJobs = jobs.filter((j) => jobIds.includes(j.id));
-      if (!selectedJobs.length)
-        throw new Error('Seçilen taramalar bulunamadı.');
-      // Every profile collected in the selected scans, deduped by
-      // platform+username keeping the most recently collected copy — and
-      // every candidate excluded pre-visit in those same scans, deduped the
-      // same way.
+    if (
+      req.method === 'GET' &&
+      (route === '/api/export-all' || route === '/api/export-rows')
+    ) {
+      const { rows, excluded } = collectExportRows(
+        (url.searchParams.get('jobIds') || '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      );
+      if (route === '/api/export-rows') return send(res, 200, { rows });
+      // Every candidate excluded pre-visit in the selected scans, deduped by
+      // platform+username.
       const excludedCategoryLabels = {
         title: 'Unvan öneki',
         private: 'Kilitli hesap',
@@ -1778,48 +1819,6 @@ const server = http.createServer(async (req, res) => {
         'ai-gender': 'Cinsiyet (AI)',
         'previously-rejected': 'Daha önce uygun değil',
       };
-      // Which single source account (within a job that may read several)
-      // actually turned up this username — following-mode jobs record each
-      // source's own discovered list in sourceLists, so this is precise
-      // rather than just naming every source the job had.
-      const sourceFor = (j, username) => {
-        if (j.mode === 'following' && j.sourceLists) {
-          for (const [source, list] of Object.entries(j.sourceLists))
-            if (
-              list.users?.some(
-                (u) => u.toLowerCase() === username.toLowerCase(),
-              )
-            )
-              return `@${source}`;
-        }
-        return j.sources.join(', ');
-      };
-      const rowsByKey = new Map();
-      const excludedByKey = new Map();
-      for (const j of selectedJobs) {
-        if (j.demo) continue;
-        for (const row of j.rows) {
-          const key = `${row.platform || j.platform || 'instagram'}:${row.username.toLowerCase()}`;
-          const prior = rowsByKey.get(key);
-          if (
-            !prior ||
-            (Date.parse(row.collectedAt) || 0) >
-              (Date.parse(prior.collectedAt) || 0)
-          )
-            rowsByKey.set(key, {
-              ...row,
-              sourceLabel: sourceFor(j, row.username),
-            });
-        }
-        for (const [key, c] of Object.entries(j.excludedCandidates || {}))
-          if (!excludedByKey.has(key))
-            excludedByKey.set(key, {
-              ...c,
-              sourceLabel: sourceFor(j, c.username),
-            });
-      }
-      const rows = [...rowsByKey.values()];
-      const excluded = [...excludedByKey.values()];
       const workbook = new ExcelJS.Workbook();
       const sheet = workbook.addWorksheet('Taranan Profiller', {
         views: [{ state: 'frozen', ySplit: 1 }],
