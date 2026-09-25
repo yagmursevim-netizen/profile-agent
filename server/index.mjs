@@ -286,6 +286,15 @@ function pruneOldJobData() {
       for (const c of Object.values(job.excludedCandidates)) delete c.photoUrl;
     kept++;
     if (kept <= RECENT_JOBS_WITH_FULL_DISCOVERY_DATA) continue;
+    // A job whose status fell out of ACTIVE_STATUSES (e.g. 'completed',
+    // 'partial') can still have unread sources — hasResumableWork() and
+    // "Devam et" don't gate on status at all. Stripping sourceLists here
+    // used to break that: 'following' mode's resume path assumes
+    // job.sourceLists is still an object and writes job.sourceLists[source]
+    // directly, which threw "Cannot set properties of undefined" the
+    // instant a resumed source finished reading — every remaining source
+    // failed the same way, discovering nothing.
+    if (hasResumableWork(job)) continue;
     delete job.sourceLists;
     delete job.candidates;
   }
@@ -509,6 +518,12 @@ async function run(job, controller) {
       job.cachedCount = 0;
       job.sourceLists = {};
       job.sourcesDone = [];
+    } else {
+      // A job resumed after its sourceLists was stripped (pruneOldJobData —
+      // an old bug there could still do this to an already-saved job even
+      // after the fix above) must not crash the moment a 'following' source
+      // finishes and this run tries to write job.sourceLists[source].
+      job.sourceLists = job.sourceLists || {};
     }
     // Sources already fully read (this run or an earlier one, before a stop)
     // are skipped on resume instead of being re-read from scratch — this is

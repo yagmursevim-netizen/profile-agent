@@ -556,6 +556,11 @@ void test('save() prunes sourceLists/candidates from old non-active jobs at boot
   const makeJob = (id, status) => ({
     id,
     sources: ['x'],
+    // Every source attempted (success or failure), same as a real finished
+    // job — otherwise hasResumableWork() sees an unread source and, since
+    // pruning now skips any job it still considers resumable, none of these
+    // fixture jobs would ever get pruned regardless of status/age.
+    sourcesDone: ['x'],
     mode: 'following',
     limit: 1,
     total: 1,
@@ -581,6 +586,12 @@ void test('save() prunes sourceLists/candidates from old non-active jobs at boot
     makeJob('recent-5', 'cancelled'),
     makeJob('old-6', 'completed'),
     makeJob('old-7', 'cancelled'),
+    // Old, non-active by status, but still has an unread source — exactly
+    // the case that used to crash a later "Devam et": pruning stripped
+    // sourceLists, and the resumed 'following' loop then wrote
+    // job.sourceLists[source] straight into undefined the moment that
+    // source finished reading.
+    { ...makeJob('old-8-resumable', 'completed'), sourcesDone: [] },
     makeJob('active-1', 'running'),
     // 'blocked' is old (well past the recent-5 window) but still counts as
     // active — quota/restriction jobs are exactly what auto-resume expects
@@ -649,6 +660,10 @@ void test('save() prunes sourceLists/candidates from old non-active jobs at boot
     assert.ok(
       byId['blocked-old'].sourceLists,
       'blocked job must never be pruned regardless of age',
+    );
+    assert.ok(
+      byId['old-8-resumable'].sourceLists,
+      'a job with an unread source must never be pruned, however old or its status, or a later resume crashes',
     );
     for (const job of saved)
       if (
