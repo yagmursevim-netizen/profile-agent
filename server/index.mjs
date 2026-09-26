@@ -914,9 +914,14 @@ async function run(job, controller) {
           await visitPending();
         } catch (e) {
           if (signal.aborted || e.blocked) throw e;
+          // Deliberately NOT added to sourcesDone — most failures here
+          // (page didn't load in time, browser context closed mid-read) are
+          // transient, not a permanent block on that source. Marking it done
+          // anyway would make it unretryable: "Devam et" skips anything
+          // already in sourcesDone, so a single bad read would need a whole
+          // new scan instead of just resuming. The warning below still makes
+          // the failure visible either way.
           job.warnings.push(`@${source}: ${e.message}`);
-          sourcesDone.add(source);
-          job.sourcesDone = [...sourcesDone];
         }
       }
       noteSkippedDiscovery();
