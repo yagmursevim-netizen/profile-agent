@@ -148,6 +148,30 @@ const MARKETS = [
 // Checking remainingUsers alone missed that case entirely: a restriction
 // hit early enough (before the first source finished reading) left a job
 // with no "Devam et" option and no way to continue short of a full re-scan.
+// job.candidates and job.sourceLists[*].candidates hold full per-candidate
+// discovery data (photo URLs included) for every account a 'following'-mode
+// scan has ever read — server-only, used for pre-visit filtering and CSV
+// exports. The frontend never reads either: app/page.tsx's SourceProgress
+// only touches sourceLists[*].followers. Sending the rest over HTTP on every
+// poll was pure waste, and for a job with a large following list, large
+// enough on its own to OOM the process serializing it for a response — this
+// is what actually crashed production, a different cost from the on-disk
+// jobs.json size pruneOldJobData() already addresses (that one only trims
+// what gets persisted, not what gets served).
+function toClientJob(job) {
+  const { candidates, sourceLists, ...rest } = job;
+  return sourceLists
+    ? {
+        ...rest,
+        sourceLists: Object.fromEntries(
+          Object.entries(sourceLists).map(([source, list]) => [
+            source,
+            { followers: list.followers ?? null },
+          ]),
+        ),
+      }
+    : rest;
+}
 // Shared by /api/export-all (Excel) and /api/export-rows (JSON, for the
 // in-browser filter/curate screen before a final import-format download) —
 // same dedup rules either way: every profile collected across the selected
@@ -1800,7 +1824,10 @@ const server = http.createServer(async (req, res) => {
       return send(
         res,
         200,
-        jobs.map(({ rows, ...j }) => ({ ...j, count: rows.length })),
+        jobs.map((j) => {
+          const { rows, excludedCandidates, ...slim } = toClientJob(j);
+          return { ...slim, count: rows.length };
+        }),
       );
     if (
       req.method === 'GET' &&
@@ -2159,7 +2186,8 @@ const server = http.createServer(async (req, res) => {
     if (match) {
       const job = jobs.find((j) => j.id === match[1]);
       if (!job) return send(res, 404, { error: 'Tarama bulunamadı.' });
-      if (req.method === 'GET' && !match[2]) return send(res, 200, job);
+      if (req.method === 'GET' && !match[2])
+        return send(res, 200, toClientJob(job));
       if (req.method === 'GET' && match[2] === 'usernames') {
         const handles = [
           ...new Set(

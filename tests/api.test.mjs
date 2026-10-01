@@ -831,3 +831,155 @@ void test('GET /api/export-rows returns deduped JSON rows across selected scans,
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+void test('GET /api/jobs and /api/jobs/:id strip heavy per-candidate discovery data the frontend never reads', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-slim-job-test-'));
+  await mkdir(path.join(dir, '.local'));
+  const seeded = [
+    {
+      id: 'cccccccc-1111-4111-8111-111111111111',
+      sources: ['srcA'],
+      sourcesDone: ['srcA'],
+      mode: 'following',
+      platform: 'instagram',
+      limit: 100,
+      total: 1,
+      done: 1,
+      status: 'completed',
+      message: 'saved',
+      warnings: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      rows: [{ username: 'visited', platform: 'instagram', collectedAt: '2026-01-01T00:00:00Z' }],
+      sourceLists: {
+        srcA: {
+          followers: 12345,
+          users: ['heavyuser'],
+          requestedLimit: 100,
+          candidates: {
+            heavyuser: { photoUrl: 'https://cdn.example/heavy.jpg', photos: ['a', 'b', 'c'] },
+          },
+        },
+      },
+      candidates: {
+        heavyuser: { photoUrl: 'https://cdn.example/heavy.jpg', photos: ['a', 'b', 'c'] },
+      },
+      excludedCandidates: {
+        heavyuser: { username: 'heavyuser', photoUrl: 'https://cdn.example/heavy.jpg', reason: 'x' },
+      },
+    },
+  ];
+  await writeFile(path.join(dir, '.local/jobs.json'), JSON.stringify(seeded));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const get = (route) => fetch(base + route, { headers: { Cookie: cookie } });
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+
+    const list = await (await get('/api/jobs')).json();
+    const summary = list.find((j) => j.id === seeded[0].id);
+    assert.equal(
+      summary.sourceLists.srcA.candidates,
+      undefined,
+      'list view keeps sourceLists trimmed to just followers, same as detail view',
+    );
+    assert.equal(summary.candidates, undefined, 'list view drops candidates entirely');
+    assert.equal(
+      summary.excludedCandidates,
+      undefined,
+      'list view drops excludedCandidates entirely',
+    );
+    assert.equal(summary.count, 1);
+
+    const detail = await (await get(`/api/jobs/${seeded[0].id}`)).json();
+    assert.equal(detail.candidates, undefined, 'detail view drops the heavy candidates map');
+    assert.equal(
+      detail.sourceLists.srcA.followers,
+      12345,
+      'detail view keeps the one field the UI actually reads',
+    );
+    assert.equal(
+      detail.sourceLists.srcA.candidates,
+      undefined,
+      'detail view drops the nested per-source candidate/photo map',
+    );
+    assert.equal(
+      detail.sourceLists.srcA.users,
+      undefined,
+      'detail view drops the raw per-source username list',
+    );
+    // photoUrl itself is gone here too, but that's pruneOldJobData() already
+    // stripping it at boot (this job is non-active) — a separate, pre-
+    // existing behavior covered by its own test. What this checks is that
+    // toClientJob() doesn't ALSO strip excludedCandidates wholesale, unlike
+    // candidates/sourceLists.candidates, since the UI does render it.
+    assert.equal(detail.excludedCandidates.heavyuser.username, 'heavyuser');
+    assert.equal(detail.rows[0].username, 'visited');
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
