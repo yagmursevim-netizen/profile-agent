@@ -72,6 +72,13 @@ export function settings() {
     // source's hover/scroll phase takes.
     accountSwitchMinSources: saved.accountSwitchMinSources ?? 1,
     accountSwitchMaxSources: saved.accountSwitchMaxSources ?? 2,
+    // Self-feeding discovery loop (see maybeContinueChain in index.mjs):
+    // whenever AI (or a human) settles on "Uygun aday" for a scanned
+    // profile, that person's own following list automatically becomes the
+    // sources for a new scan. Off by default — an unattended scan spawning
+    // further unattended scans on its own is a meaningfully different
+    // operating mode, worth an explicit opt-in rather than silently active.
+    autoChainEnabled: saved.autoChainEnabled ?? false,
   };
 }
 export function publicSettings() {
@@ -99,6 +106,7 @@ export function publicSettings() {
     accountSwitchMaxMinutes: s.accountSwitchMaxMinutes,
     accountSwitchMinSources: s.accountSwitchMinSources,
     accountSwitchMaxSources: s.accountSwitchMaxSources,
+    autoChainEnabled: s.autoChainEnabled,
   };
 }
 export async function updateSettings(input) {
@@ -239,6 +247,8 @@ export async function updateSettings(input) {
   }
   if ((next.accountSwitchMinSources ?? 1) > (next.accountSwitchMaxSources ?? 2))
     throw new Error('Rotasyon alt kaynak sınırı üst sınırdan büyük olamaz.');
+  if (typeof input.autoChainEnabled !== 'undefined')
+    next.autoChainEnabled = !!input.autoChainEnabled;
   queue = queue
     .catch(() => {})
     .then(async () => {

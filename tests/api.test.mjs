@@ -983,3 +983,169 @@ void test('GET /api/jobs and /api/jobs/:id strip heavy per-candidate discovery d
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+void test('marking a profile "Uygun aday" auto-chains a new following-mode scan from their following list, deduped against usernames already used as a source', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-chain-test-'));
+  await mkdir(path.join(dir, '.local'));
+  await writeFile(
+    path.join(dir, '.local/settings.json'),
+    JSON.stringify({ autoChainEnabled: true }),
+  );
+  const rootJob = {
+    id: 'dddddddd-1111-4111-8111-111111111111',
+    sources: ['rootsource'],
+    sourcesDone: ['rootsource'],
+    mode: 'following',
+    platform: 'instagram',
+    market: 'gr',
+    limit: 100,
+    total: 2,
+    done: 2,
+    status: 'completed',
+    message: 'saved',
+    warnings: [],
+    createdAt: '2026-01-01T00:00:00Z',
+    rows: [
+      { username: 'candidateone', platform: 'instagram', collectedAt: '2026-01-01T00:00:00Z', ai: null },
+      { username: 'candidatetwo', platform: 'instagram', collectedAt: '2026-01-01T00:00:00Z', ai: null },
+    ],
+    ownerId: 'owner-1',
+    ownerName: 'Owner One',
+  };
+  // Already uses 'candidatetwo' as a source elsewhere — the dedup case.
+  const otherJob = {
+    id: 'eeeeeeee-2222-4111-8111-222222222222',
+    sources: ['candidatetwo'],
+    mode: 'following',
+    platform: 'instagram',
+    limit: 100,
+    total: 0,
+    done: 0,
+    status: 'completed',
+    message: 'saved',
+    warnings: [],
+    createdAt: '2026-01-01T00:00:00Z',
+    rows: [],
+    ownerId: 'owner-1',
+    ownerName: 'Owner One',
+  };
+  await writeFile(
+    path.join(dir, '.local/jobs.json'),
+    JSON.stringify([rootJob, otherJob]),
+  );
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const get = (route) => fetch(base + route, { headers: { Cookie: cookie } });
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+
+    const markRes = await post(
+      `/api/jobs/${rootJob.id}/mark-verdict`,
+      { verdict: 'Uygun aday', usernames: ['candidateone', 'candidatetwo'] },
+    );
+    assert.equal(markRes.status, 200);
+    assert.equal((await markRes.json()).marked, 2);
+
+    const list = await (await get('/api/jobs')).json();
+    const children = list.filter(
+      (j) => j.chainId === rootJob.id && j.id !== rootJob.id,
+    );
+    assert.equal(
+      children.length,
+      1,
+      'exactly one chain job created, batching all new verdicts together',
+    );
+    const child_ = children[0];
+    assert.equal(child_.mode, 'following');
+    assert.deepEqual(child_.sources, ['candidateone']);
+    assert.equal(
+      child_.sources.includes('candidatetwo'),
+      false,
+      'candidatetwo already used as a source elsewhere — deduped out',
+    );
+    assert.equal(child_.chainGeneration, 2);
+    assert.equal(child_.market, 'gr', 'inherits market from the parent');
+
+    // Re-marking the same usernames must not create a second chain job —
+    // candidateone is now itself used as a source (by the child just
+    // created), so a repeat trigger has nothing new to add.
+    await post(`/api/jobs/${rootJob.id}/mark-verdict`, {
+      verdict: 'Uygun aday',
+      usernames: ['candidateone'],
+    });
+    const listAfter = await (await get('/api/jobs')).json();
+    assert.equal(
+      listAfter.filter((j) => j.chainId === rootJob.id && j.id !== rootJob.id)
+        .length,
+      1,
+      'still exactly one child — no duplicate chain job from a repeat trigger',
+    );
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});

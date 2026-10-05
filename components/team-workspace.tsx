@@ -36,6 +36,8 @@ type JobSummary = {
   createdAt: string;
   platform?: string;
   demo?: boolean;
+  market?: string;
+  chainId?: string;
 };
 type ExportRow = {
   username: string;
@@ -58,6 +60,7 @@ const csvCell = (value: string | number | null | undefined) => {
 };
 type Task = {
   id: string;
+  jobId?: string;
   ownerId: string;
   ownerName: string;
   kind: string;
@@ -228,10 +231,39 @@ export function TeamWorkspace({
       live = false;
     };
   }, []);
-  const toggleExportJob = (id: string) =>
-    setExportJobIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
+  // One row per chain, not one per generation — a chain's job ids (root +
+  // every auto-continued follow-up) are carried as memberIds so selecting
+  // the row's checkbox exports every generation's rows together
+  // (/api/export-all already dedupes rows across job ids by
+  // platform+username, so this needs no backend change). The representative
+  // row shows the latest generation's own fields, except count, which sums
+  // across the whole chain.
+  const chainedJobs = (() => {
+    const groups = new Map<string, JobSummary[]>();
+    for (const j of jobs) {
+      const key = j.chainId || j.id;
+      const list = groups.get(key);
+      if (list) list.push(j);
+      else groups.set(key, [j]);
+    }
+    return [...groups.values()].map((members) => {
+      const latest = members.reduce((a, b) =>
+        Date.parse(b.createdAt) > Date.parse(a.createdAt) ? b : a,
+      );
+      return {
+        ...latest,
+        count: members.reduce((n, m) => n + m.count, 0),
+        memberIds: members.map((m) => m.id),
+      };
+    });
+  })();
+  const toggleExportChain = (memberIds: string[]) =>
+    setExportJobIds((prev) => {
+      const allSelected = memberIds.every((id) => prev.includes(id));
+      return allSelected
+        ? prev.filter((id) => !memberIds.includes(id))
+        : [...new Set([...prev, ...memberIds])];
+    });
   const [sheetOpen, setSheetOpen] = useState(false);
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetError, setSheetError] = useState('');
@@ -332,11 +364,30 @@ export function TeamWorkspace({
         t.platform === platform ||
         !!t.platforms?.includes(platform)),
   );
+  // One row per scan, not one per task: the hourly auto-resume feature
+  // (quota/restriction recovery) and the auto-chaining feature both enqueue
+  // a fresh task — for the former, a repeat of the same job; for the
+  // latter, a new job in the same chain. Collapsing to the most recently
+  // created task per chain shows whichever generation is current without
+  // older "Otomatik devam"/earlier-generation rows cluttering the list.
+  const jobById = new Map(jobs.map((j) => [j.id, j]));
+  const chainKeyFor = (t: Task) => {
+    const job = t.jobId ? jobById.get(t.jobId) : undefined;
+    return job?.chainId || job?.id || t.jobId || t.id;
+  };
+  const latestPerChain = new Map<string, Task>();
+  for (const t of filteredTasks) {
+    const key = chainKeyFor(t);
+    const prior = latestPerChain.get(key);
+    if (!prior || Date.parse(t.createdAt) >= Date.parse(prior.createdAt))
+      latestPerChain.set(key, t);
+  }
+  const collapsedTasks = [...latestPerChain.values()];
   const ordered = [
-    ...filteredTasks.filter((t) =>
+    ...collapsedTasks.filter((t) =>
       ['queued', 'running', 'stopping'].includes(t.status),
     ),
-    ...filteredTasks
+    ...collapsedTasks
       .filter((t) => !['queued', 'running', 'stopping'].includes(t.status))
       .reverse(),
   ].slice(0, 150);
@@ -457,16 +508,20 @@ export function TeamWorkspace({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {jobs.map((j) => (
-                <TableRow key={j.id}>
+              {chainedJobs.map((j) => (
+                <TableRow key={j.chainId || j.id}>
                   <TableCell>
                     <Checkbox
                       aria-label={`${j.sources.join(', ')} taramasını seç`}
-                      checked={exportJobIds.includes(j.id)}
-                      onCheckedChange={() => toggleExportJob(j.id)}
+                      checked={j.memberIds.every((id) =>
+                        exportJobIds.includes(id),
+                      )}
+                      onCheckedChange={() => toggleExportChain(j.memberIds)}
                     />
                   </TableCell>
-                  <TableCell>{j.sources.join(', ')}</TableCell>
+                  <TableCell>
+                    {(j.market ?? 'tr').toUpperCase()} {j.sources.join(', ')}
+                  </TableCell>
                   <TableCell>
                     {j.mode === 'following'
                       ? 'Takip listesi'
@@ -697,7 +752,10 @@ export function TeamWorkspace({
                       : t.kind === 'ai'
                         ? 'AI'
                         : 'Email'}{' '}
-                    · {t.title}
+                    ·{' '}
+                    {t.jobId &&
+                      `${(jobById.get(t.jobId)?.market ?? 'tr').toUpperCase()} `}
+                    {t.title}
                   </TableCell>
                   <TableCell>
                     {t.platforms?.map(platformLabel).join(' + ') ||

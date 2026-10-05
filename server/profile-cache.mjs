@@ -69,6 +69,19 @@ export function rejectedUsernames(jobs, platform = 'instagram') {
   }
   return set;
 }
+// Every username ever submitted as a scan SOURCE (not as a discovered
+// candidate) across any job on this platform — used so the auto-chaining
+// feature (see maybeContinueChain in index.mjs) never re-uses someone as a
+// source twice, which is also what keeps a chain's growth naturally
+// tapering off instead of needing an artificial cap.
+export function sourceUsernameSet(jobs, platform = 'instagram') {
+  const set = new Set();
+  for (const j of jobs) {
+    if (j.demo || (j.platform || 'instagram') !== platform) continue;
+    for (const s of j.sources) set.add(s.toLowerCase());
+  }
+  return set;
+}
 export function needsInstagram(
   jobs,
   sources,

@@ -1780,7 +1780,7 @@ function Workspace({
                     summaries.length
                       ? summaries.map((s) => ({
                           value: s.id,
-                          label: `${s.platform === 'tiktok' ? 'TikTok · ' : 'Instagram · '}${s.demo ? 'Örnek · ' : ''}${s.sources
+                          label: `${s.platform === 'tiktok' ? 'TikTok · ' : 'Instagram · '}${s.demo ? 'Örnek · ' : ''}${(s.market ?? 'tr').toUpperCase()} ${s.sources
                             .slice(0, 2)
                             .map((x) => '@' + x)
                             .join(

@@ -14,6 +14,7 @@ import {
   cachedFollowing,
   needsInstagram,
   rejectedUsernames,
+  sourceUsernameSet,
 } from './profile-cache.mjs';
 import {
   notifyRestriction,
@@ -159,7 +160,7 @@ const MARKETS = [
 // jobs.json size pruneOldJobData() already addresses (that one only trims
 // what gets persisted, not what gets served).
 function toClientJob(job) {
-  const { candidates, sourceLists, ...rest } = job;
+  const { candidates: _candidates, sourceLists, ...rest } = job;
   return sourceLists
     ? {
         ...rest,
@@ -216,6 +217,69 @@ function collectExportRows(jobIds) {
         excludedByKey.set(key, { ...c, sourceLabel: sourceFor(j, c.username) });
   }
   return { rows: [...rowsByKey.values()], excluded: [...excludedByKey.values()] };
+}
+// The self-feeding discovery loop: whenever AI (or a human, via mark-verdict)
+// settles on "Uygun aday" for a scanned profile, that person's own following
+// list becomes the sources for a brand-new scan — called from run()'s
+// success path, reanalyze()'s completion and the mark-verdict route, i.e.
+// every place a row's verdict can become final. Off by default (Bağlantılar
+// → "Otomatik zincirleme taraması"), since this lets an unattended scan
+// spawn further unattended scans on its own.
+async function maybeContinueChain(job, candidateSettings) {
+  if (!candidateSettings.autoChainEnabled || job.demo) return;
+  const used = sourceUsernameSet(jobs, job.platform || 'instagram');
+  const seen = new Set();
+  const next = [];
+  for (const row of job.rows) {
+    if (row.ai?.verdict !== 'Uygun aday') continue;
+    const key = row.username.toLowerCase();
+    if (used.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    next.push(row.username);
+  }
+  // Nothing new to add a source for — the chain's natural stopping point,
+  // not an error. No cap needed on the other end either: a username can
+  // only ever be used as a source once, so growth tapers off on its own as
+  // the local graph gets exhausted.
+  if (!next.length) return;
+  const jobId = randomUUID();
+  const child = {
+    id: jobId,
+    sources: next,
+    platform: job.platform || 'instagram',
+    mode: 'following',
+    market: job.market,
+    forceRescan: [],
+    limit: job.limit,
+    model: null,
+    rows: [],
+    status: 'queued',
+    ownerId: job.ownerId,
+    ownerName: job.ownerName,
+    done: 0,
+    total: 0,
+    message: 'Tarama hazırlanıyor…',
+    warnings: [],
+    createdAt: new Date().toISOString(),
+    chainId: job.chainId ?? job.id,
+    chainGeneration: (job.chainGeneration ?? 1) + 1,
+  };
+  jobs.unshift(child);
+  try {
+    await save();
+    await queue.enqueue({
+      kind: 'scan',
+      jobId,
+      ownerId: job.ownerId,
+      ownerName: job.ownerName,
+      platform: child.platform,
+      title: `Otomatik zincir · ${next.slice(0, 3).join(', ')}${next.length > 3 ? '…' : ''}`,
+    });
+  } catch (e) {
+    jobs = jobs.filter((j) => j.id !== jobId);
+    await save();
+    console.error('Otomatik zincirleme taraması başlatılamadı:', e.message);
+  }
 }
 function hasResumableWork(job) {
   if (job.remainingUsers?.length) return true;
@@ -1007,6 +1071,7 @@ async function run(job, controller) {
       ? 'partial'
       : 'completed';
     job.message = `${job.done} hesap işlendi; ${job.cachedCount} profil kayıtlı veriden kullanıldı.${job.status === 'partial' ? ' Eksik alanlar ve tarama notlarını inceleyin.' : ''}`;
+    await maybeContinueChain(job, candidateSettings);
   } catch (e) {
     if (e.restrictedUntil) job.restrictedUntil = e.restrictedUntil;
     job.status = signal.aborted
@@ -1057,6 +1122,7 @@ async function reanalyze(job, model, controller, handles) {
       ? 'partial'
       : 'completed';
     job.message = 'AI değerlendirmesi tamamlandı.';
+    await maybeContinueChain(job, settings());
   } catch (e) {
     job.status = controller.signal.aborted ? 'cancelled' : 'failed';
     job.message = controller.signal.aborted
@@ -1825,7 +1891,8 @@ const server = http.createServer(async (req, res) => {
         res,
         200,
         jobs.map((j) => {
-          const { rows, excludedCandidates, ...slim } = toClientJob(j);
+          const { rows, excludedCandidates: _excludedCandidates, ...slim } =
+            toClientJob(j);
           return { ...slim, count: rows.length };
         }),
       );
@@ -2141,8 +2208,9 @@ const server = http.createServer(async (req, res) => {
         b.mode === 'candidates' && b.csv
           ? candidateInfoFromCsv(b.text || '', platform)
           : undefined;
+      const jobId = randomUUID();
       const job = {
-        id: randomUUID(),
+        id: jobId,
         sources: orderedSources,
         platform,
         mode: b.mode,
@@ -2159,6 +2227,11 @@ const server = http.createServer(async (req, res) => {
         message: 'Tarama hazırlanıyor…',
         warnings: [],
         createdAt: new Date().toISOString(),
+        // Every job is the root of its own chain unless maybeContinueChain()
+        // creates a follow-up with chainId pointing back here — see its
+        // definition for what links generations together.
+        chainId: jobId,
+        chainGeneration: 1,
         ...(candidateInfo ? { candidates: candidateInfo } : {}),
       };
       jobs.unshift(job);
@@ -2392,6 +2465,8 @@ const server = http.createServer(async (req, res) => {
           marked++;
         }
         await save();
+        if (verdict === 'Uygun aday')
+          await maybeContinueChain(job, settings());
         return send(res, 200, { ok: true, marked });
       }
       if (req.method === 'POST' && match[2] === 'export') {

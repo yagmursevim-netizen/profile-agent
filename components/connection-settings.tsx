@@ -28,6 +28,7 @@ export function ConnectionSettings() {
     accountSwitchMaxMinutes: 40,
     accountSwitchMinSources: 1,
     accountSwitchMaxSources: 2,
+    autoChainEnabled: false,
   });
   const [openaiKey, setOpenaiKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
@@ -495,6 +496,26 @@ export function ConnectionSettings() {
         arasında yeniden rastgele seçilir, hep aynı olmaz. Kullanılamayan
         (askıya alınmış, kısıtlı, devre dışı) hesaplar rotasyona hiç girmez.
       </p>
+      <h3>Otomatik zincirleme taraması</h3>
+      <p>
+        AI (ya da elle) bir profili “Uygun aday” olarak işaretlediğinde, o
+        kişinin takip ettiği hesaplar otomatik olarak yeni bir taramanın
+        kaynağı olur — kişiyi bulduk, şimdi onun takip listesini tarayalım.
+        Bir kullanıcı adı aynı taramada iki kez kaynak olarak kullanılmaz, bu
+        yüzden zincir doğal olarak tükenir; ayrıca bir sınır koymaya gerek
+        kalmaz.
+      </p>
+      <label htmlFor="auto-chain-enabled">
+        <input
+          id="auto-chain-enabled"
+          type="checkbox"
+          checked={config.autoChainEnabled}
+          onChange={(e) =>
+            setConfig({ ...config, autoChainEnabled: e.target.checked })
+          }
+        />{' '}
+        Otomatik zincirleme taraması aktif
+      </label>
       <p className="field-hint">
         Sunucu çökmesi veya Instagram/TikTok kısıtı oluştuğunda
         yagmur.sevim@hiwellapp.com ve ysevimyagmur@gmail.com adreslerine
