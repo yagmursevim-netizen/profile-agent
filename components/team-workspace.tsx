@@ -469,6 +469,24 @@ export function TeamWorkspace({
       )}
       {view === 'dashboard' && (
         <div className="panel sender-panel">
+          <h3>DM listesi</h3>
+          <p>
+            Email’i olmayan, Bağlantılar’da ayarlı takipçi aralığındaki kadın
+            hesapları (fotoğraftan AI ile belirlenir) tüm taramalardan
+            toplayıp indirir. Daha önce indirilen hesaplar bir sonraki
+            indirmede tekrar gelmez.
+          </p>
+          <a
+            className="button-link"
+            href="/api/dm-list"
+            download="hiwell-dm-listesi.xlsx"
+          >
+            DM listesi indir
+          </a>
+        </div>
+      )}
+      {view === 'dashboard' && (
+        <div className="panel sender-panel">
           <h3>Tarama dışa aktarımı</h3>
           <p>
             Aşağıdan dışa aktarmak istediğin taramaları seç — profil linki,

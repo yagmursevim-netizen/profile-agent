@@ -1149,3 +1149,394 @@ void test('marking a profile "Uygun aday" auto-chains a new following-mode scan 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+void test('GET /api/dm-list selects email-less in-range women across every job, skips already-downloaded ones on a repeat call, and refuses when classification is needed but no OpenAI key is set', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-test-'));
+  await mkdir(path.join(dir, '.local'));
+  const row = (overrides) => ({
+    platform: 'instagram',
+    collectedAt: '2026-01-01T00:00:00Z',
+    email: null,
+    followers: 10000,
+    photoUrl: 'https://cdn.example/photo.jpg',
+    genderGuess: 'kadın',
+    ...overrides,
+  });
+  const seeded = [
+    {
+      id: 'ffffffff-1111-4111-8111-111111111111',
+      sources: ['src'],
+      mode: 'following',
+      platform: 'instagram',
+      limit: 100,
+      total: 5,
+      done: 5,
+      status: 'completed',
+      message: 'saved',
+      warnings: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      rows: [
+        row({ username: 'qualifiedwoman' }),
+        row({ username: 'qualifiedman', genderGuess: 'erkek' }),
+        row({ username: 'hasemail', email: 'x@example.com' }),
+        row({ username: 'toofew', followers: 100 }),
+        row({ username: 'toomany', followers: 1_000_000 }),
+      ],
+    },
+  ];
+  await writeFile(path.join(dir, '.local/jobs.json'), JSON.stringify(seeded));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const get = (route) => fetch(base + route, { headers: { Cookie: cookie } });
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+
+    const first = await get('/api/dm-list');
+    assert.equal(first.status, 200);
+    const firstBook = new ExcelJS.Workbook();
+    await firstBook.xlsx.load(Buffer.from(await first.arrayBuffer()));
+    const firstSheet = firstBook.worksheets[0];
+    assert.equal(firstSheet.rowCount, 2, 'header + exactly one qualifying row');
+    assert.equal(firstSheet.getCell('A2').value.text, 'qualifiedwoman');
+
+    const second = await get('/api/dm-list');
+    assert.equal(second.status, 200);
+    const secondBook = new ExcelJS.Workbook();
+    await secondBook.xlsx.load(Buffer.from(await second.arrayBuffer()));
+    assert.equal(
+      secondBook.worksheets[0].rowCount,
+      1,
+      'qualifiedwoman already downloaded — header only this time',
+    );
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+void test('GET /api/dm-list throws a clear error instead of a silent wrong result when a row needs AI classification but no OpenAI key is configured', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-nokey-test-'));
+  await mkdir(path.join(dir, '.local'));
+  const seeded = [
+    {
+      id: 'aaaaffff-1111-4111-8111-111111111111',
+      sources: ['src'],
+      mode: 'following',
+      platform: 'instagram',
+      limit: 100,
+      total: 1,
+      done: 1,
+      status: 'completed',
+      message: 'saved',
+      warnings: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      rows: [
+        {
+          username: 'unclassified',
+          platform: 'instagram',
+          collectedAt: '2026-01-01T00:00:00Z',
+          email: null,
+          followers: 10000,
+          photoUrl: 'https://cdn.example/photo.jpg',
+          // no genderGuess yet — needs a fresh AI call
+        },
+      ],
+    },
+  ];
+  await writeFile(path.join(dir, '.local/jobs.json'), JSON.stringify(seeded));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const get = (route) => fetch(base + route, { headers: { Cookie: cookie } });
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+
+    const res = await get('/api/dm-list');
+    assert.notEqual(res.status, 200);
+    const data = await res.json();
+    assert.match(data.error, /OpenAI/);
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+void test('POST /api/jobs/:id/export skips rows already included in an earlier export of the same job, but not a different job with the same username', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-export-dedup-test-'));
+  await mkdir(path.join(dir, '.local'));
+  const makeRow = (username) => ({
+    username,
+    platform: 'instagram',
+    collectedAt: '2026-01-01T00:00:00Z',
+    email: `${username}@example.com`,
+    followers: 1000,
+    following: 100,
+    private: false,
+    bio: 'bio',
+  });
+  const seeded = [
+    {
+      id: 'bbbbffff-1111-4111-8111-111111111111',
+      sources: ['src'],
+      mode: 'profiles',
+      platform: 'instagram',
+      limit: 100,
+      total: 2,
+      done: 2,
+      status: 'completed',
+      message: 'saved',
+      warnings: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      rows: [makeRow('repeatuser'), makeRow('onlyinfirst')],
+    },
+    {
+      id: 'ccccffff-2222-4111-8111-222222222222',
+      sources: ['repeatuser'],
+      mode: 'profiles',
+      platform: 'instagram',
+      limit: 100,
+      total: 1,
+      done: 1,
+      status: 'completed',
+      message: 'saved',
+      warnings: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      rows: [makeRow('repeatuser')],
+    },
+  ];
+  await writeFile(path.join(dir, '.local/jobs.json'), JSON.stringify(seeded));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+
+    const firstJobId = seeded[0].id;
+    const secondJobId = seeded[1].id;
+
+    const first = await post(`/api/jobs/${firstJobId}/export`, {
+      format: 'csv',
+      filters: {},
+    });
+    assert.equal(first.status, 200);
+    const firstCsv = await first.text();
+    assert.match(firstCsv, /repeatuser/);
+    assert.match(firstCsv, /onlyinfirst/);
+
+    const second = await post(`/api/jobs/${firstJobId}/export`, {
+      format: 'csv',
+      filters: {},
+    });
+    const secondCsv = await second.text();
+    assert.doesNotMatch(
+      secondCsv,
+      /repeatuser/,
+      'already exported from this job — skipped on the repeat pull',
+    );
+    assert.doesNotMatch(secondCsv, /onlyinfirst/);
+
+    const otherJob = await post(`/api/jobs/${secondJobId}/export`, {
+      format: 'csv',
+      filters: {},
+    });
+    const otherJobCsv = await otherJob.text();
+    assert.match(
+      otherJobCsv,
+      /repeatuser/,
+      "a different job is not affected by the first job's export log",
+    );
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});

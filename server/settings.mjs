@@ -79,6 +79,11 @@ export function settings() {
     // further unattended scans on its own is a meaningfully different
     // operating mode, worth an explicit opt-in rather than silently active.
     autoChainEnabled: saved.autoChainEnabled ?? false,
+    // DM outreach list (see /api/dm-list in index.mjs): candidates with no
+    // email on file, follower count in this range, and AI-classified
+    // ("Uygun" — see genderGuess) as a woman from their profile photo.
+    dmListMinFollowers: saved.dmListMinFollowers ?? 5000,
+    dmListMaxFollowers: saved.dmListMaxFollowers ?? 20000,
   };
 }
 export function publicSettings() {
@@ -107,6 +112,8 @@ export function publicSettings() {
     accountSwitchMinSources: s.accountSwitchMinSources,
     accountSwitchMaxSources: s.accountSwitchMaxSources,
     autoChainEnabled: s.autoChainEnabled,
+    dmListMinFollowers: s.dmListMinFollowers,
+    dmListMaxFollowers: s.dmListMaxFollowers,
   };
 }
 export async function updateSettings(input) {
@@ -249,6 +256,26 @@ export async function updateSettings(input) {
     throw new Error('Rotasyon alt kaynak sınırı üst sınırdan büyük olamaz.');
   if (typeof input.autoChainEnabled !== 'undefined')
     next.autoChainEnabled = !!input.autoChainEnabled;
+  if (typeof input.dmListMinFollowers !== 'undefined') {
+    const n = Number(input.dmListMinFollowers);
+    if (!Number.isInteger(n) || n < 0 || n > 1_000_000_000)
+      throw new Error(
+        'DM listesi alt takipçi sınırı 0-1.000.000.000 arasında bir sayı olmalı.',
+      );
+    next.dmListMinFollowers = n;
+  }
+  if (typeof input.dmListMaxFollowers !== 'undefined') {
+    const n = Number(input.dmListMaxFollowers);
+    if (!Number.isInteger(n) || n < 0 || n > 1_000_000_000)
+      throw new Error(
+        'DM listesi üst takipçi sınırı 0-1.000.000.000 arasında bir sayı olmalı.',
+      );
+    next.dmListMaxFollowers = n;
+  }
+  if (
+    (next.dmListMinFollowers ?? 5000) > (next.dmListMaxFollowers ?? 20000)
+  )
+    throw new Error('DM listesi alt sınırı üst sınırdan büyük olamaz.');
   queue = queue
     .catch(() => {})
     .then(async () => {

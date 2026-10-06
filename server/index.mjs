@@ -38,6 +38,12 @@ import { Instagram } from './instagram.mjs';
 import { demoRows } from './demo.mjs';
 import { models, assess, screenPhoto, generatePost } from './ai.mjs';
 import { settings, publicSettings, updateSettings } from './settings.mjs';
+import {
+  wasExportedToDmList,
+  markExportedToDmList,
+  wasExportedForJob,
+  markExportedForJob,
+} from './export-log.mjs';
 import { Outreach } from './outreach.mjs';
 import { profileSignals } from './profile-signals.mjs';
 import {
@@ -2048,6 +2054,138 @@ const server = http.createServer(async (req, res) => {
       res.end(Buffer.from(file));
       return;
     }
+    if (req.method === 'GET' && route === '/api/dm-list') {
+      // DM outreach candidates across every scan ever run (not scoped to a
+      // chosen set, unlike export-all) — no email on file (those go through
+      // email outreach instead), follower count in the configured range,
+      // and a woman by AI photo guess. No reliable "is this a woman" field
+      // exists on an already-visited row otherwise (see candidateSettings
+      // below) — genderGuess is computed here, once, and cached on the row
+      // for every future call.
+      const candidateSettings = settings();
+      const seen = new Map();
+      for (const j of jobs) {
+        if (j.demo) continue;
+        for (const row of j.rows) {
+          const platform = row.platform || j.platform || 'instagram';
+          const key = `${platform}:${row.username.toLowerCase()}`;
+          const prior = seen.get(key);
+          if (
+            !prior ||
+            (Date.parse(row.collectedAt) || 0) >
+              (Date.parse(prior.row.collectedAt) || 0)
+          )
+            seen.set(key, { row, job: j, platform });
+        }
+      }
+      const candidates = [...seen.values()].filter(
+        ({ row, platform }) =>
+          !row.email &&
+          typeof row.followers === 'number' &&
+          row.followers >= candidateSettings.dmListMinFollowers &&
+          row.followers <= candidateSettings.dmListMaxFollowers &&
+          !wasExportedToDmList(platform, row.username),
+      );
+      // A row with no photo can never be classified — leave it unclassified
+      // forever rather than guessing; it's simply excluded below along with
+      // anything else that isn't confirmed "kadın".
+      const needsClassification = candidates.filter(
+        ({ row }) => row.genderGuess == null && row.photoUrl,
+      );
+      if (needsClassification.length && !candidateSettings.openaiKey)
+        throw new Error('Bağlantılar bölümünde OpenAI API key ayarlayın.');
+      if (needsClassification.length) {
+        const concurrency = Math.min(6, needsClassification.length);
+        const next = needsClassification.values();
+        const signal = new AbortController().signal;
+        const worker = async () => {
+          for (const { row } of next) {
+            for (let attempt = 0; ; attempt++) {
+              try {
+                const screen = await screenPhoto(
+                  row.fullName,
+                  row.photoUrl,
+                  candidateSettings,
+                  signal,
+                );
+                row.genderGuess = screen.genderGuess ?? 'belirsiz';
+                break;
+              } catch (e) {
+                if (e.status === 429 && attempt < 3) {
+                  await delay(1000 * 2 ** attempt, null, { signal });
+                  continue;
+                }
+                row.genderGuess = 'belirsiz';
+                break;
+              }
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: concurrency }, () => worker()));
+        await save();
+      }
+      const selected = candidates.filter(
+        ({ row }) => row.genderGuess === 'kadın',
+      );
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('DM listesi', {
+        views: [{ state: 'frozen', ySplit: 1 }],
+      });
+      sheet.addRow([
+        'Kullanıcı adı',
+        'İsim',
+        'Takipçi',
+        'Platform',
+        'Bio',
+        'DM kanıtı',
+        'Dil',
+        'Kaynak',
+      ]);
+      sheet.columns.forEach(
+        (c, i) => (c.width = [22, 26, 12, 12, 65, 50, 14, 30][i]),
+      );
+      for (const { row, job, platform } of selected) {
+        const r = sheet.addRow([
+          row.username,
+          row.fullName || '',
+          row.followers ?? '',
+          platform === 'tiktok' ? 'TikTok' : 'Instagram',
+          row.bio || '',
+          row.dmEvidence || '',
+          row.language || 'Bilinmiyor',
+          job.sources.join(', '),
+        ]);
+        r.getCell(1).value = {
+          text: row.username,
+          hyperlink: profileUrl(row.username, platform),
+        };
+        r.getCell(1).font = { color: { argb: 'FF146D62' }, underline: true };
+        r.alignment = { vertical: 'top', wrapText: true };
+      }
+      sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      sheet.getRow(1).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF155B51' },
+      };
+      sheet.getRow(1).height = 28;
+      sheet.autoFilter = { from: 'A1', to: 'H1' };
+      const file = await workbook.xlsx.writeBuffer();
+      const byPlatform = new Map();
+      for (const { row, platform } of selected) {
+        if (!byPlatform.has(platform)) byPlatform.set(platform, []);
+        byPlatform.get(platform).push(row.username);
+      }
+      for (const [platform, usernames] of byPlatform)
+        await markExportedToDmList(platform, usernames);
+      res.writeHead(200, {
+        'Content-Type':
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': 'attachment; filename="hiwell-dm-listesi.xlsx"',
+      });
+      res.end(Buffer.from(file));
+      return;
+    }
     if (req.method === 'POST' && route === '/api/demo') {
       if (active)
         return send(res, 409, {
@@ -2471,7 +2609,19 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST' && match[2] === 'export') {
         const b = await body(req);
-        const rows = filterRows(job.rows, b.filters);
+        // Skips anyone already handed out in an earlier export of this same
+        // job — the point for a long multi-day scan that's re-pulled daily
+        // as more results come in, so each day's download only has what's
+        // new since the last one.
+        const jobPlatform = job.platform || 'instagram';
+        const rows = filterRows(job.rows, b.filters).filter(
+          (r) => !wasExportedForJob(job.id, r.platform || jobPlatform, r.username),
+        );
+        await markExportedForJob(
+          job.id,
+          jobPlatform,
+          rows.map((r) => r.username),
+        );
         if (b.format === 'csv') {
           res.writeHead(200, {
             'Content-Type': 'text/csv; charset=utf-8',

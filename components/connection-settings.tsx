@@ -29,6 +29,8 @@ export function ConnectionSettings() {
     accountSwitchMinSources: 1,
     accountSwitchMaxSources: 2,
     autoChainEnabled: false,
+    dmListMinFollowers: 5000,
+    dmListMaxFollowers: 20000,
   });
   const [openaiKey, setOpenaiKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
@@ -252,6 +254,40 @@ export function ConnectionSettings() {
         kartından okunan takipçi sayısıyla, profil ziyaretinden önce). 0
         bırakılırsa alt sınır uygulanmaz.
       </p>
+      <h3>DM listesi</h3>
+      <p>
+        Ekip → Dashboard’daki “DM listesi indir” taranmış tüm hesaplardan,
+        email’i olmayan ve bu takipçi aralığındaki kadın hesapları seçer
+        (fotoğraftan AI ile kadın/erkek tahmini yapılır, sonuç tekrar
+        kullanmak için kaydedilir). Daha önce indirilen hesaplar bir sonraki
+        indirmede tekrar gelmez.
+      </p>
+      <label htmlFor="dm-list-min">Alt takipçi sınırı</label>
+      <Input
+        id="dm-list-min"
+        type="number"
+        min={0}
+        value={config.dmListMinFollowers}
+        onChange={(e) =>
+          setConfig({
+            ...config,
+            dmListMinFollowers: Number(e.target.value) || 0,
+          })
+        }
+      />
+      <label htmlFor="dm-list-max">Üst takipçi sınırı</label>
+      <Input
+        id="dm-list-max"
+        type="number"
+        min={0}
+        value={config.dmListMaxFollowers}
+        onChange={(e) =>
+          setConfig({
+            ...config,
+            dmListMaxFollowers: Number(e.target.value) || 0,
+          })
+        }
+      />
       <label htmlFor="title-prefixes">
         Elenecek unvan önekleri (virgülle ayrılmış)
       </label>
