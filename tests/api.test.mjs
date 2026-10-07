@@ -1545,3 +1545,154 @@ void test('POST /api/jobs/:id/export skips rows already included in an earlier e
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+void test('GET /api/export-all and /api/export-rows share the same per-job export log as /api/jobs/:id/export — a username pulled through any of them is skipped by the others afterward', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-export-all-dedup-test-'));
+  await mkdir(path.join(dir, '.local'));
+  const makeRow = (username) => ({
+    username,
+    platform: 'instagram',
+    collectedAt: '2026-01-01T00:00:00Z',
+    email: `${username}@example.com`,
+    followers: 1000,
+    following: 100,
+    private: false,
+    bio: 'bio',
+  });
+  const seeded = [
+    {
+      id: 'eeeeaaaa-1111-4111-8111-111111111111',
+      sources: ['src'],
+      mode: 'profiles',
+      platform: 'instagram',
+      limit: 100,
+      total: 2,
+      done: 2,
+      status: 'completed',
+      message: 'saved',
+      warnings: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      rows: [makeRow('viaexportall'), makeRow('viaexportrows')],
+    },
+  ];
+  await writeFile(path.join(dir, '.local/jobs.json'), JSON.stringify(seeded));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const get = (route) => fetch(base + route, { headers: { Cookie: cookie } });
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+
+    const jobId = seeded[0].id;
+
+    // /api/export-rows only previews — it must not mark anything by
+    // itself, since the filter sheet may show more than the user ends up
+    // actually keeping/downloading.
+    const viaRows = await (await get(`/api/export-rows?jobIds=${jobId}`)).json();
+    assert.deepEqual(
+      viaRows.rows.map((r) => r.username).sort(),
+      ['viaexportall', 'viaexportrows'],
+      'both rows still present before anything has been exported',
+    );
+    const second = await (await get(`/api/export-rows?jobIds=${jobId}`)).json();
+    assert.deepEqual(
+      second.rows.map((r) => r.username).sort(),
+      ['viaexportall', 'viaexportrows'],
+      'a repeat preview still shows both — merely fetching is not exporting',
+    );
+
+    // Explicitly marking 'viaexportrows' (as the filter sheet's actual
+    // "İçe aktarım formatında indir" download does) is what logs it.
+    const markRes = await post('/api/export-rows/mark', {
+      rows: [{ jobId, platform: 'instagram', username: 'viaexportrows' }],
+    });
+    assert.equal(markRes.status, 200);
+
+    // /api/export-all now only sees 'viaexportall' — 'viaexportrows' was
+    // explicitly marked above.
+    const firstAll = await get(`/api/export-all?jobIds=${jobId}`);
+    assert.equal(firstAll.status, 200);
+    const firstBook = new ExcelJS.Workbook();
+    await firstBook.xlsx.load(Buffer.from(await firstAll.arrayBuffer()));
+    const firstSheet = firstBook.worksheets[0];
+    assert.equal(firstSheet.rowCount, 2, 'header + exactly one row');
+    assert.equal(firstSheet.getCell('A2').value.text, 'viaexportall');
+
+    // Both have now been logged (one via export-all, one via the explicit
+    // mark call) — the single-job export (a separate route, same per-job
+    // log) sees neither anymore.
+    const single = await post(`/api/jobs/${jobId}/export`, {
+      format: 'csv',
+      filters: {},
+    });
+    const singleCsv = await single.text();
+    assert.doesNotMatch(singleCsv, /viaexportall/);
+    assert.doesNotMatch(singleCsv, /viaexportrows/);
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});

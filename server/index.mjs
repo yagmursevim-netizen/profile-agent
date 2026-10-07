@@ -216,7 +216,11 @@ function collectExportRows(jobIds) {
         !prior ||
         (Date.parse(row.collectedAt) || 0) > (Date.parse(prior.collectedAt) || 0)
       )
-        rowsByKey.set(key, { ...row, sourceLabel: sourceFor(j, row.username) });
+        rowsByKey.set(key, {
+          ...row,
+          sourceLabel: sourceFor(j, row.username),
+          jobId: j.id,
+        });
     }
     for (const [key, c] of Object.entries(j.excludedCandidates || {}))
       if (!excludedByKey.has(key))
@@ -1890,13 +1894,35 @@ const server = http.createServer(async (req, res) => {
       req.method === 'GET' &&
       (route === '/api/export-all' || route === '/api/export-rows')
     ) {
-      const { rows, excluded } = collectExportRows(
+      const { rows: allRows, excluded } = collectExportRows(
         (url.searchParams.get('jobIds') || '')
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean),
       );
+      // Same "don't repeat an earlier download" log the single-job export
+      // uses (markExportedForJob/wasExportedForJob — per job, not global),
+      // so a username already pulled out via any of these export paths
+      // won't show up again in any of them.
+      const rows = allRows.filter(
+        (r) => !wasExportedForJob(r.jobId, r.platform || 'instagram', r.username),
+      );
+      // export-rows only *previews* candidates for the filter/curate sheet
+      // — the actual export is a client-side download of whatever the user
+      // ends up keeping after filtering, which may be fewer than this full
+      // list, so marking happens via POST /api/export-rows/mark instead,
+      // right when that download actually happens (see team-workspace.tsx).
       if (route === '/api/export-rows') return send(res, 200, { rows });
+      const byJobPlatform = new Map();
+      for (const r of rows) {
+        const platform = r.platform || 'instagram';
+        const k = `${r.jobId}::${platform}`;
+        const entry = byJobPlatform.get(k) || { jobId: r.jobId, platform, usernames: [] };
+        entry.usernames.push(r.username);
+        byJobPlatform.set(k, entry);
+      }
+      for (const { jobId, platform, usernames } of byJobPlatform.values())
+        await markExportedForJob(jobId, platform, usernames);
       // Every candidate excluded pre-visit in the selected scans, deduped by
       // platform+username.
       const excludedCategoryLabels = {
@@ -2037,6 +2063,33 @@ const server = http.createServer(async (req, res) => {
       });
       res.end(Buffer.from(file));
       return;
+    }
+    if (req.method === 'POST' && route === '/api/export-rows/mark') {
+      // Called right when the filter/curate sheet's client-side "İçe
+      // aktarım formatında indir" download actually happens — export-rows
+      // itself only previews candidates (see above) and may show more than
+      // what the user ends up keeping after filtering, so marking can't
+      // happen there.
+      const b = await body(req);
+      const rows = Array.isArray(b.rows) ? b.rows : [];
+      const byJobPlatform = new Map();
+      for (const r of rows) {
+        if (
+          typeof r?.jobId !== 'string' ||
+          typeof r?.username !== 'string' ||
+          !r.username
+        )
+          continue;
+        const platform =
+          typeof r.platform === 'string' && r.platform ? r.platform : 'instagram';
+        const k = `${r.jobId}::${platform}`;
+        const entry = byJobPlatform.get(k) || { jobId: r.jobId, platform, usernames: [] };
+        entry.usernames.push(r.username);
+        byJobPlatform.set(k, entry);
+      }
+      for (const { jobId, platform, usernames } of byJobPlatform.values())
+        await markExportedForJob(jobId, platform, usernames);
+      return send(res, 200, { ok: true });
     }
     if (req.method === 'GET' && route === '/api/dm-list') {
       // DM outreach candidates across every scan ever run (not scoped to a

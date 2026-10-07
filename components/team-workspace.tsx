@@ -48,6 +48,7 @@ type ExportRow = {
   language?: string;
   ai: { verdict: string; reason: string } | null;
   sourceLabel: string;
+  jobId?: string;
 };
 const rowKey = (r: ExportRow) => `${r.platform || 'instagram'}:${r.username.toLowerCase()}`;
 // Mirrors server/domain.mjs's csvCell — same spreadsheet-formula-injection
@@ -327,7 +328,25 @@ export function TeamWorkspace({
   };
   const filteredSheetRows = sheetRows.filter(matchesFilters);
   const finalRows = filteredSheetRows.filter((r) => includedKeys.has(rowKey(r)));
-  const downloadImportCsv = () => {
+  const downloadImportCsv = async () => {
+    // export-rows (which populated this sheet) only ever previews — this is
+    // the actual export, so this is where "don't repeat someone already
+    // handed out" gets logged, same per-job log every other export route
+    // shares. Only rows with a jobId can be logged (always true for real
+    // data; defensive for anything odd slipping through).
+    const loggable = finalRows.filter((r) => r.jobId);
+    if (loggable.length)
+      await fetch('/api/export-rows/mark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rows: loggable.map((r) => ({
+            jobId: r.jobId,
+            platform: r.platform || 'instagram',
+            username: r.username,
+          })),
+        }),
+      }).catch(() => {});
     const lines = [
       ['email', 'name', 'username', 'platform'],
       ...finalRows.map((r) => [
@@ -730,7 +749,7 @@ export function TeamWorkspace({
           <DialogFooter>
             <Button
               disabled={!finalRows.length}
-              onClick={downloadImportCsv}
+              onClick={() => void downloadImportCsv()}
             >
               İçe aktarım formatında indir ({finalRows.length})
             </Button>
