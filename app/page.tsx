@@ -1024,7 +1024,6 @@ function Workspace({
                       id="limit"
                       type="number"
                       min={1}
-                      max={5000}
                       value={limit}
                       disabled={['profiles', 'candidates'].includes(mode)}
                       onChange={(e) => setLimit(e.target.value)}
@@ -1345,11 +1344,7 @@ function Workspace({
                     </span>
                     <span>{job.message}</span>
                     {job.warnings
-                      .filter(
-                        (w) =>
-                          w.includes('hesap takip ediyor') ||
-                          w.includes('5.000 farklı'),
-                      )
+                      .filter((w) => w.includes('hesap takip ediyor'))
                       .map((w, i) => (
                         <span key={i} className="notice warning" role="alert">
                           {w}

@@ -419,15 +419,20 @@ for (const testOrigin of [
         ).status,
         429,
       );
+      // No upper bound on "Kaynak başına sınır" anymore (removed — accounts
+      // already enforce their own daily visit cap) — a value above the old
+      // 5000 ceiling is accepted the same as any other positive integer,
+      // same 429 here as the limit: 5000 case above since this fixture's
+      // restriction gate is what actually stops it, not validation.
       assert.equal(
         (
           await post('/api/jobs', {
             text: 'one',
             mode: 'following',
-            limit: 5001,
+            limit: 50001,
           })
         ).status,
-        400,
+        429,
       );
       const marketResponse = await post('/api/jobs', {
         text: 'cacheduser',

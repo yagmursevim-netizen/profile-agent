@@ -495,7 +495,6 @@ async function screenAndAddCandidates({
   const excludedUsernames = excludedUsernameSet(aiConfig.excludedUsernames);
   const pending = [];
   for (const u of users) {
-    if (targets.size + pending.length >= 5000) break;
     const info = job.candidates?.[u.toLowerCase()];
     if (excludedUsernames.has(u.toLowerCase())) {
       recordExcluded(
@@ -600,7 +599,6 @@ async function screenAndAddCandidates({
       recordExcluded(u, info, entry.reason, entry.source);
       continue;
     }
-    if (targets.size >= 5000) break;
     targets.add(u);
   }
 }
@@ -898,12 +896,11 @@ async function run(job, controller) {
         if (sourcesDone.has(term)) continue;
         if (job.skipRemainingDiscovery) break;
         signal.throwIfAborted();
-        if ((job.discoveredUsers?.length || 0) >= 5000) break;
         job.message = 'TikTok araması: ' + term;
         await save();
         const result = await tiktokBridge.search(
           term,
-          Math.min(job.limit, 5000 - targets.size),
+          job.limit,
           signal,
           (count) => {
             job.message = term + ': ' + count + ' hesap bulundu';
@@ -923,12 +920,6 @@ async function run(job, controller) {
         if (sourcesDone.has(source)) continue;
         if (job.skipRemainingDiscovery) break;
         signal.throwIfAborted();
-        if ((job.discoveredUsers?.length || 0) >= 5000) {
-          job.warnings.push(
-            'Toplam 5.000 farklı hesap sınırına ulaşıldı; kalan kaynaklar açılmadı.',
-          );
-          break;
-        }
         const rotatedTo = await maybeRotateAccountForSource();
         job.message = rotatedTo
           ? `Rotasyon: @${rotatedTo.username} hesabına geçildi — @${source} takip listesi açılıyor…`
@@ -990,13 +981,6 @@ async function run(job, controller) {
           addDiscovered(targets);
           persistTargets();
           await save();
-          if (
-            (job.discoveredUsers?.length || 0) >= 5000 &&
-            job.sources.length > 1
-          )
-            job.warnings.push(
-              'Bu taramada toplam en fazla 5.000 farklı profil incelenir.',
-            );
           if (result.warning) job.warnings.push(result.warning);
           sourcesDone.add(source);
           job.sourcesDone = [...sourcesDone];
@@ -2259,7 +2243,7 @@ const server = http.createServer(async (req, res) => {
         b.text || '',
         !!b.csv,
         platform,
-        ['profiles', 'candidates'].includes(b.mode) ? 5000 : 500,
+        ['profiles', 'candidates'].includes(b.mode) ? Infinity : 500,
       );
       // Lets the client warn before re-scanning someone already read
       // successfully in a past job (see 'profiles' mode's forceRescan
@@ -2282,7 +2266,7 @@ const server = http.createServer(async (req, res) => {
               b.text || '',
               !!b.csv,
               platform,
-              ['profiles', 'candidates'].includes(b.mode) ? 5000 : 500,
+              ['profiles', 'candidates'].includes(b.mode) ? Infinity : 500,
             );
       // Optional per-source "following" CSV column (see followingCounts) —
       // when present, smaller sources are read first so results and any
@@ -2304,8 +2288,8 @@ const server = http.createServer(async (req, res) => {
       )
         throw new Error('Geçersiz tarama türü.');
       const limit = Number(b.limit ?? 5000);
-      if (!Number.isInteger(limit) || limit < 1 || limit > 5000)
-        throw new Error('Kaynak başına sınır 1–5.000 olmalı.');
+      if (!Number.isInteger(limit) || limit < 1)
+        throw new Error('Kaynak başına sınır en az 1 olmalı.');
       if (b.market !== undefined && !MARKETS.includes(b.market))
         throw new Error('Geçersiz hedef pazar.');
       const market = MARKETS.includes(b.market) ? b.market : 'tr';
