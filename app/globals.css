@@ -1057,6 +1057,10 @@ div[data-slot='table-container']:has(.profile-table) {
   background: #eceaf5;
   color: #8581a4;
 }
+.source-chip.failed {
+  background: #fbeaea;
+  color: #8a2f2f;
+}
 .job-state {
   display: flex;
   align-items: center;

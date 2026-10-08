@@ -737,6 +737,7 @@ async function run(job, controller) {
       job.cachedCount = 0;
       job.sourceLists = {};
       job.sourcesDone = [];
+      job.sourcesFailed = [];
     } else {
       // A job resumed after its sourceLists was stripped (pruneOldJobData —
       // an old bug there could still do this to an already-saved job even
@@ -748,6 +749,13 @@ async function run(job, controller) {
     // are skipped on resume instead of being re-read from scratch — this is
     // what makes a scan stopped mid-discovery (not just mid-visit) resumable.
     const sourcesDone = new Set(job.sourcesDone || []);
+    // Sources that errored on their most recent attempt (not aborted/
+    // blocked) — shown separately from "Sırada" (not yet attempted) in the
+    // UI's SourceProgress, so a transient read failure doesn't look
+    // indistinguishable from a source that simply hasn't been reached yet.
+    // Not a block on resuming — see the catch block below, which
+    // deliberately never adds a failed source to sourcesDone either.
+    const sourcesFailed = new Set(job.sourcesFailed || []);
     const targets = new Set(resuming ? job.remainingUsers : []);
     // discoveredUsers is the running total across the job's whole life
     // (including already-visited users); targets only ever holds users not
@@ -1066,6 +1074,10 @@ async function run(job, controller) {
           if (result.warning) job.warnings.push(result.warning);
           sourcesDone.add(source);
           job.sourcesDone = [...sourcesDone];
+          // A retry (via "Devam et") of a previously-failed source that
+          // succeeds this time is done now, not failed — clear it so it
+          // doesn't keep showing as "Hatalı" in the UI.
+          if (sourcesFailed.delete(source)) job.sourcesFailed = [...sourcesFailed];
           // Fully visit this source's newly discovered candidates (plus
           // anything still pending from before) before opening the next
           // source's following list — one source finishes start-to-finish
@@ -1082,6 +1094,8 @@ async function run(job, controller) {
           // new scan instead of just resuming. The warning below still makes
           // the failure visible either way.
           job.warnings.push(`@${source}: ${e.message}`);
+          sourcesFailed.add(source);
+          job.sourcesFailed = [...sourcesFailed];
         }
       }
       noteSkippedDiscovery();

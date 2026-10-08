@@ -113,6 +113,7 @@ type Job = {
   id: string;
   sources: string[];
   sourcesDone?: string[];
+  sourcesFailed?: string[];
   sourceLists?: Record<string, { followers?: number | null }>;
   discoveredUsers?: string[];
   excludedCandidates?: Record<string, ExcludedCandidate>;
@@ -216,12 +217,18 @@ function Choice({
   );
 }
 // Sources are processed strictly in job.sources order (see run() in
-// index.mjs), so the first one not yet in sourcesDone is exactly the one
-// currently being read — no separate "current source" field needed.
+// index.mjs), so the first one neither done nor failed is exactly the one
+// currently being read — no separate "current source" field needed. Failed
+// sources (errored, not aborted/blocked) are deliberately never marked done
+// (see run()'s catch block — this is what keeps them retryable via "Devam
+// et"), so they have to be excluded here explicitly too, or a failure
+// would misreport itself as "Şu an" forever once the run moves past it.
 function SourceProgress({ job }: { job: Job }) {
   const done = new Set(job.sourcesDone ?? []);
+  const failed = new Set(job.sourcesFailed ?? []);
   const doneList = job.sources.filter((s) => done.has(s));
-  const remaining = job.sources.filter((s) => !done.has(s));
+  const failedList = job.sources.filter((s) => failed.has(s));
+  const remaining = job.sources.filter((s) => !done.has(s) && !failed.has(s));
   const [current, ...upcoming] = remaining;
   const followerCount = (s: string) => job.sourceLists?.[s]?.followers;
   return (
@@ -251,6 +258,19 @@ function SourceProgress({ job }: { job: Job }) {
           <span className="source-group-label">Sırada ({upcoming.length})</span>
           {upcoming.map((s) => (
             <span key={s} className="source-chip upcoming">
+              @{s}
+            </span>
+          ))}
+        </div>
+      )}
+      {failedList.length > 0 && (
+        <div className="source-group">
+          <span className="source-group-label">
+            Hatalı ({failedList.length}) — &quot;Devam et&quot; ile tekrar
+            denenir
+          </span>
+          {failedList.map((s) => (
+            <span key={s} className="source-chip failed">
               @{s}
             </span>
           ))}
