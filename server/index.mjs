@@ -291,6 +291,84 @@ async function maybeContinueChain(job, candidateSettings) {
     console.error('Otomatik zincirleme taraması başlatılamadı:', e.message);
   }
 }
+// DM list (GET /api/dm-list) candidate gathering — shared by the route
+// itself and POST /api/dm-list/start's background classification pass.
+function gatherDmListCandidates(candidateSettings) {
+  const seen = new Map();
+  for (const j of jobs) {
+    if (j.demo) continue;
+    for (const row of j.rows) {
+      const platform = row.platform || j.platform || 'instagram';
+      const key = `${platform}:${row.username.toLowerCase()}`;
+      const prior = seen.get(key);
+      if (
+        !prior ||
+        (Date.parse(row.collectedAt) || 0) >
+          (Date.parse(prior.row.collectedAt) || 0)
+      )
+        seen.set(key, { row, job: j, platform });
+    }
+  }
+  const candidates = [...seen.values()].filter(
+    ({ row, platform }) =>
+      !row.email &&
+      typeof row.followers === 'number' &&
+      row.followers >= candidateSettings.dmListMinFollowers &&
+      row.followers <= candidateSettings.dmListMaxFollowers &&
+      !wasExportedToDmList(platform, row.username),
+  );
+  // A row with no photo can never be classified — leave it unclassified
+  // forever rather than guessing; it's simply excluded downstream along
+  // with anything else that isn't confirmed "kadın".
+  const needsClassification = candidates.filter(
+    ({ row }) => row.genderGuess == null && row.photoUrl,
+  );
+  return { candidates, needsClassification };
+}
+let dmListProgress = { status: 'idle', done: 0, total: 0, error: null };
+async function runDmListClassification(needsClassification, candidateSettings) {
+  dmListProgress = {
+    status: 'running',
+    done: 0,
+    total: needsClassification.length,
+    error: null,
+  };
+  try {
+    const concurrency = Math.min(6, needsClassification.length);
+    const next = needsClassification.values();
+    const signal = new AbortController().signal;
+    const worker = async () => {
+      for (const { row } of next) {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            const screen = await screenPhoto(
+              row.fullName,
+              row.photoUrl,
+              candidateSettings,
+              signal,
+            );
+            row.genderGuess = screen.genderGuess ?? 'belirsiz';
+            break;
+          } catch (e) {
+            if (e.status === 429 && attempt < 3) {
+              await delay(1000 * 2 ** attempt, null, { signal });
+              continue;
+            }
+            row.genderGuess = 'belirsiz';
+            break;
+          }
+        }
+        dmListProgress.done++;
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    await save();
+  } catch (e) {
+    dmListProgress = { status: 'idle', done: 0, total: 0, error: e.message };
+    return;
+  }
+  dmListProgress = { status: 'idle', done: 0, total: 0, error: null };
+}
 function hasResumableWork(job) {
   if (job.remainingUsers?.length) return true;
   if (['following', 'search'].includes(job.mode)) {
@@ -2091,76 +2169,46 @@ const server = http.createServer(async (req, res) => {
         await markExportedForJob(jobId, platform, usernames);
       return send(res, 200, { ok: true });
     }
+    if (req.method === 'POST' && route === '/api/dm-list/start') {
+      // Classification can take minutes for a large first-time backlog —
+      // long enough that the LAN gateway's 180s idle timeout (see
+      // lan-gateway.mjs) kills the connection before GET /api/dm-list ever
+      // gets to send its first response byte, which a browser shows as
+      // "site wasn't available". Running it here, in the background,
+      // outside any single request/response cycle, is what avoids that:
+      // the frontend polls /api/dm-list/status instead of holding one
+      // long-lived connection open, and only calls GET /api/dm-list (fast,
+      // nothing left to classify) once status is back to 'idle'.
+      if (dmListProgress.status === 'running')
+        return send(res, 200, dmListProgress);
+      const candidateSettings = settings();
+      const { needsClassification } = gatherDmListCandidates(candidateSettings);
+      if (!needsClassification.length)
+        return send(res, 200, { status: 'idle', done: 0, total: 0, error: null });
+      if (!candidateSettings.openaiKey)
+        throw new Error('Bağlantılar bölümünde OpenAI API key ayarlayın.');
+      void runDmListClassification(needsClassification, candidateSettings);
+      return send(res, 200, dmListProgress);
+    }
+    if (req.method === 'GET' && route === '/api/dm-list/status')
+      return send(res, 200, dmListProgress);
     if (req.method === 'GET' && route === '/api/dm-list') {
       // DM outreach candidates across every scan ever run (not scoped to a
       // chosen set, unlike export-all) — no email on file (those go through
       // email outreach instead), follower count in the configured range,
       // and a woman by AI photo guess. No reliable "is this a woman" field
-      // exists on an already-visited row otherwise (see candidateSettings
-      // below) — genderGuess is computed here, once, and cached on the row
-      // for every future call.
+      // exists on an already-visited row otherwise — genderGuess is
+      // computed (normally via /start beforehand; see there) and cached on
+      // the row for every future call. Still handled inline here too as a
+      // fallback for anything that slipped through (e.g. a new scan
+      // finished between /start and this call) — usually a no-op.
       const candidateSettings = settings();
-      const seen = new Map();
-      for (const j of jobs) {
-        if (j.demo) continue;
-        for (const row of j.rows) {
-          const platform = row.platform || j.platform || 'instagram';
-          const key = `${platform}:${row.username.toLowerCase()}`;
-          const prior = seen.get(key);
-          if (
-            !prior ||
-            (Date.parse(row.collectedAt) || 0) >
-              (Date.parse(prior.row.collectedAt) || 0)
-          )
-            seen.set(key, { row, job: j, platform });
-        }
-      }
-      const candidates = [...seen.values()].filter(
-        ({ row, platform }) =>
-          !row.email &&
-          typeof row.followers === 'number' &&
-          row.followers >= candidateSettings.dmListMinFollowers &&
-          row.followers <= candidateSettings.dmListMaxFollowers &&
-          !wasExportedToDmList(platform, row.username),
-      );
-      // A row with no photo can never be classified — leave it unclassified
-      // forever rather than guessing; it's simply excluded below along with
-      // anything else that isn't confirmed "kadın".
-      const needsClassification = candidates.filter(
-        ({ row }) => row.genderGuess == null && row.photoUrl,
-      );
+      const { candidates, needsClassification } =
+        gatherDmListCandidates(candidateSettings);
       if (needsClassification.length && !candidateSettings.openaiKey)
         throw new Error('Bağlantılar bölümünde OpenAI API key ayarlayın.');
-      if (needsClassification.length) {
-        const concurrency = Math.min(6, needsClassification.length);
-        const next = needsClassification.values();
-        const signal = new AbortController().signal;
-        const worker = async () => {
-          for (const { row } of next) {
-            for (let attempt = 0; ; attempt++) {
-              try {
-                const screen = await screenPhoto(
-                  row.fullName,
-                  row.photoUrl,
-                  candidateSettings,
-                  signal,
-                );
-                row.genderGuess = screen.genderGuess ?? 'belirsiz';
-                break;
-              } catch (e) {
-                if (e.status === 429 && attempt < 3) {
-                  await delay(1000 * 2 ** attempt, null, { signal });
-                  continue;
-                }
-                row.genderGuess = 'belirsiz';
-                break;
-              }
-            }
-          }
-        };
-        await Promise.all(Array.from({ length: concurrency }, () => worker()));
-        await save();
-      }
+      if (needsClassification.length)
+        await runDmListClassification(needsClassification, candidateSettings);
       const selected = candidates.filter(
         ({ row }) => row.genderGuess === 'kadın',
       );

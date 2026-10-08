@@ -265,6 +265,82 @@ export function TeamWorkspace({
         ? prev.filter((id) => !memberIds.includes(id))
         : [...new Set([...prev, ...memberIds])];
     });
+  const [dmList, setDmList] = useState<{
+    status: string;
+    done: number;
+    total: number;
+    error: string | null;
+  } | null>(null);
+  const triggerDmDownload = () => {
+    const a = document.createElement('a');
+    a.href = '/api/dm-list';
+    a.download = 'hiwell-dm-listesi.xlsx';
+    a.click();
+  };
+  const startDmList = async () => {
+    setDmList({ status: 'starting', done: 0, total: 0, error: null });
+    try {
+      const res = await fetch('/api/dm-list/start', { method: 'POST' });
+      const data = (await res.json()) as {
+        status: string;
+        done: number;
+        total: number;
+        error: string | null;
+      };
+      if (!res.ok) throw new Error(data.error || 'Başlatılamadı.');
+      if (data.status === 'idle') {
+        setDmList(null);
+        triggerDmDownload();
+        return;
+      }
+      setDmList(data);
+    } catch (e) {
+      setDmList({
+        status: 'error',
+        done: 0,
+        total: 0,
+        error: (e as Error).message,
+      });
+    }
+  };
+  // Classification runs in the background (POST /api/dm-list/start) rather
+  // than inside the download request itself — a large first-time backlog
+  // can take minutes, long enough that the LAN gateway's idle timeout kills
+  // a single held-open connection. Polling here instead, then triggering
+  // the actual (now-fast, nothing left to classify) download once status
+  // goes back to 'idle'.
+  useEffect(() => {
+    if (dmList?.status !== 'running') return;
+    let live = true;
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const res = await fetch('/api/dm-list/status');
+          const data = (await res.json()) as {
+            status: string;
+            done: number;
+            total: number;
+            error: string | null;
+          };
+          if (!live) return;
+          if (data.error) {
+            setDmList({ ...data, status: 'error' });
+            return;
+          }
+          if (data.status === 'idle') {
+            setDmList(null);
+            triggerDmDownload();
+            return;
+          }
+          setDmList(data);
+        } catch {}
+      })();
+    }, 2000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [dmList?.status]);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetError, setSheetError] = useState('');
@@ -495,13 +571,22 @@ export function TeamWorkspace({
             toplayıp indirir. Daha önce indirilen hesaplar bir sonraki
             indirmede tekrar gelmez.
           </p>
-          <a
-            className="button-link"
-            href="/api/dm-list"
-            download="hiwell-dm-listesi.xlsx"
+          <Button
+            variant="outline"
+            disabled={dmList?.status === 'starting' || dmList?.status === 'running'}
+            onClick={() => void startDmList()}
           >
-            DM listesi indir
-          </a>
+            {dmList?.status === 'running'
+              ? `Sınıflandırılıyor… (${dmList.done}/${dmList.total})`
+              : dmList?.status === 'starting'
+                ? 'Başlatılıyor…'
+                : 'DM listesi indir'}
+          </Button>
+          {dmList?.status === 'error' && (
+            <p className="notice error" role="alert">
+              {dmList.error}
+            </p>
+          )}
         </div>
       )}
       {view === 'dashboard' && (

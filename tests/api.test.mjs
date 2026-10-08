@@ -1696,3 +1696,131 @@ void test('GET /api/export-all and /api/export-rows share the same per-job expor
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+void test('POST /api/dm-list/start returns immediately (status: idle) when nothing needs classifying, and errors without starting a background run when classification is needed but no OpenAI key is set', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-start-test-'));
+  await mkdir(path.join(dir, '.local'));
+  const seeded = [
+    {
+      id: 'ddddffff-1111-4111-8111-111111111111',
+      sources: ['src'],
+      mode: 'following',
+      platform: 'instagram',
+      limit: 100,
+      total: 2,
+      done: 2,
+      status: 'completed',
+      message: 'saved',
+      warnings: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      rows: [
+        {
+          username: 'alreadyclassified',
+          platform: 'instagram',
+          collectedAt: '2026-01-01T00:00:00Z',
+          email: null,
+          followers: 10000,
+          photoUrl: 'https://cdn.example/photo.jpg',
+          genderGuess: 'kadın',
+        },
+        {
+          username: 'needsclassification',
+          platform: 'instagram',
+          collectedAt: '2026-01-01T00:00:00Z',
+          email: null,
+          followers: 10000,
+          photoUrl: 'https://cdn.example/photo.jpg',
+        },
+      ],
+    },
+  ];
+  await writeFile(path.join(dir, '.local/jobs.json'), JSON.stringify(seeded));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const get = (route) => fetch(base + route, { headers: { Cookie: cookie } });
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data ?? {}),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+
+    // 'needsclassification' has no cached genderGuess and no OpenAI key is
+    // configured in this fixture — /start must refuse up front rather than
+    // kicking off a background run doomed to fail silently.
+    const started = await post('/api/dm-list/start');
+    assert.notEqual(started.status, 200);
+    const startedBody = await started.json();
+    assert.match(startedBody.error, /OpenAI/);
+
+    const status = await (await get('/api/dm-list/status')).json();
+    assert.equal(
+      status.status,
+      'idle',
+      'refused start must not leave a stale "running" status behind',
+    );
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
