@@ -591,11 +591,15 @@ void test('save() prunes sourceLists/candidates from old non-active jobs at boot
     makeJob('recent-5', 'cancelled'),
     makeJob('old-6', 'completed'),
     makeJob('old-7', 'cancelled'),
-    // Old, non-active by status, but still has an unread source — exactly
-    // the case that used to crash a later "Devam et": pruning stripped
-    // sourceLists, and the resumed 'following' loop then wrote
-    // job.sourceLists[source] straight into undefined the moment that
-    // source finished reading.
+    // Old, non-active by status, and still has an unread source (so
+    // hasResumableWork() is true) — pruning used to skip jobs like this
+    // entirely to avoid crashing a later "Devam et" (see run()'s own
+    // `job.sourceLists = job.sourceLists || {}` fix for why that's no
+    // longer needed). Without that exemption this must now get pruned like
+    // any other old job — skipping it indefinitely is exactly what let
+    // jobs.json grow to 159MB in production: a job with even one
+    // permanently-failing source (see sourcesFailed) stays "resumable"
+    // forever and would otherwise never lose its full discovery data.
     { ...makeJob('old-8-resumable', 'completed'), sourcesDone: [] },
     makeJob('active-1', 'running'),
     // 'blocked' is old (well past the recent-5 window) but still counts as
@@ -656,8 +660,12 @@ void test('save() prunes sourceLists/candidates from old non-active jobs at boot
       assert.ok(byId[id].sourceLists, `${id} should keep sourceLists`);
       assert.ok(byId[id].candidates, `${id} should keep candidates`);
     }
-    for (const id of ['old-6', 'old-7']) {
-      assert.equal(byId[id].sourceLists, undefined);
+    for (const id of ['old-6', 'old-7', 'old-8-resumable']) {
+      assert.equal(
+        byId[id].sourceLists,
+        undefined,
+        `${id} should be pruned even though it's still resumable — resuming no longer depends on sourceLists surviving`,
+      );
       assert.equal(byId[id].candidates, undefined);
     }
     assert.ok(byId['active-1'].sourceLists, 'active job must never be pruned');
@@ -665,10 +673,6 @@ void test('save() prunes sourceLists/candidates from old non-active jobs at boot
     assert.ok(
       byId['blocked-old'].sourceLists,
       'blocked job must never be pruned regardless of age',
-    );
-    assert.ok(
-      byId['old-8-resumable'].sourceLists,
-      'a job with an unread source must never be pruned, however old or its status, or a later resume crashes',
     );
     for (const job of saved)
       if (

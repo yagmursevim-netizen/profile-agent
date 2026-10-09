@@ -507,15 +507,17 @@ function pruneOldJobData() {
       for (const c of Object.values(job.excludedCandidates)) delete c.photoUrl;
     kept++;
     if (kept <= RECENT_JOBS_WITH_FULL_DISCOVERY_DATA) continue;
-    // A job whose status fell out of ACTIVE_STATUSES (e.g. 'completed',
-    // 'partial') can still have unread sources — hasResumableWork() and
-    // "Devam et" don't gate on status at all. Stripping sourceLists here
-    // used to break that: 'following' mode's resume path assumes
-    // job.sourceLists is still an object and writes job.sourceLists[source]
-    // directly, which threw "Cannot set properties of undefined" the
-    // instant a resumed source finished reading — every remaining source
-    // failed the same way, discovering nothing.
-    if (hasResumableWork(job)) continue;
+    // Pruning a still-resumable job used to crash "Devam et" (it assumed
+    // job.sourceLists was still an object) — that's now handled at the
+    // resume site itself (run() re-initializes it if missing, see
+    // `job.sourceLists = job.sourceLists || {}`), so skipping resumable
+    // jobs here is no longer needed for correctness. It used to also be
+    // actively harmful: a job with even one source that keeps failing (see
+    // sourcesFailed — failed sources are deliberately never marked done, so
+    // "Devam et" can retry them) stayed "resumable" forever and so never
+    // got pruned, no matter how old — this is what let jobs.json grow to
+    // 159MB in production despite individual jobs' row counts looking
+    // completely ordinary.
     delete job.sourceLists;
     delete job.candidates;
   }
