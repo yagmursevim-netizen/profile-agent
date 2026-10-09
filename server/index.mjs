@@ -317,57 +317,20 @@ function gatherDmListCandidates(candidateSettings) {
       row.followers <= candidateSettings.dmListMaxFollowers &&
       !wasExportedToDmList(platform, row.username),
   );
-  // A row with no photo can never be classified — leave it unclassified
-  // forever rather than guessing; it's simply excluded downstream along
-  // with anything else that isn't confirmed "kadın".
+  // Classifying off the row's stored photoUrl (captured whenever that
+  // profile was originally visited, possibly weeks ago) used to silently
+  // fail for almost everyone: Instagram's CDN photo links expire within
+  // hours, so by the time a DM list gets built, OpenAI can't fetch the
+  // image and every attempt fell into the same error path — which caught
+  // the failure but cached 'belirsiz' anyway, so it looked like it worked
+  // (5000+ "classified", zero "kadın"). Needs a fresh revisit now instead
+  // (see the 'dm-refresh' job mode and /api/dm-list/start) — photoUrl is
+  // irrelevant here since the revisit gets a new one regardless of whether
+  // the old row had one at all.
   const needsClassification = candidates.filter(
-    ({ row }) => row.genderGuess == null && row.photoUrl,
+    ({ row }) => row.genderGuess == null,
   );
   return { candidates, needsClassification };
-}
-let dmListProgress = { status: 'idle', done: 0, total: 0, error: null };
-async function runDmListClassification(needsClassification, candidateSettings) {
-  dmListProgress = {
-    status: 'running',
-    done: 0,
-    total: needsClassification.length,
-    error: null,
-  };
-  try {
-    const concurrency = Math.min(6, needsClassification.length);
-    const next = needsClassification.values();
-    const signal = new AbortController().signal;
-    const worker = async () => {
-      for (const { row } of next) {
-        for (let attempt = 0; ; attempt++) {
-          try {
-            const screen = await screenPhoto(
-              row.fullName,
-              row.photoUrl,
-              candidateSettings,
-              signal,
-            );
-            row.genderGuess = screen.genderGuess ?? 'belirsiz';
-            break;
-          } catch (e) {
-            if (e.status === 429 && attempt < 3) {
-              await delay(1000 * 2 ** attempt, null, { signal });
-              continue;
-            }
-            row.genderGuess = 'belirsiz';
-            break;
-          }
-        }
-        dmListProgress.done++;
-      }
-    };
-    await Promise.all(Array.from({ length: concurrency }, () => worker()));
-    await save();
-  } catch (e) {
-    dmListProgress = { status: 'idle', done: 0, total: 0, error: e.message };
-    return;
-  }
-  dmListProgress = { status: 'idle', done: 0, total: 0, error: null };
 }
 function hasResumableWork(job) {
   if (job.remainingUsers?.length) return true;
@@ -969,6 +932,25 @@ async function run(job, controller) {
           // doesn't look like a failed read or push the job into "partial".
           row.note = `${candidateSettings.fameFollowerThreshold.toLocaleString('tr-TR')}+ takipçili (ünlü olarak değerlendirildi).`;
         row.platform = platform;
+        // DM list gender classification needs a *fresh* photo (see
+        // gatherDmListCandidates) — forceRescan on this job guarantees this
+        // visit just got one, so this is the first point it's actually
+        // usable. Left unset (not cached as 'belirsiz') on failure/no photo
+        // so a later dm-refresh run can retry rather than a transient
+        // failure or a private/deleted account permanently poisoning it.
+        if (job.mode === 'dm-refresh' && row.photoUrl && candidateSettings.openaiKey) {
+          try {
+            const screen = await screenPhoto(
+              row.fullName,
+              row.photoUrl,
+              candidateSettings,
+              signal,
+            );
+            row.genderGuess = screen.genderGuess ?? 'belirsiz';
+          } catch (e) {
+            if (signal.aborted) throw e;
+          }
+        }
         job.rows = job.rows.filter((r) => r.username !== handle);
         job.rows.push(row);
         job.done++;
@@ -2186,45 +2168,81 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && route === '/api/dm-list/start') {
-      // Classification can take minutes for a large first-time backlog —
-      // long enough that the LAN gateway's 180s idle timeout (see
-      // lan-gateway.mjs) kills the connection before GET /api/dm-list ever
-      // gets to send its first response byte, which a browser shows as
-      // "site wasn't available". Running it here, in the background,
-      // outside any single request/response cycle, is what avoids that:
-      // the frontend polls /api/dm-list/status instead of holding one
-      // long-lived connection open, and only calls GET /api/dm-list (fast,
-      // nothing left to classify) once status is back to 'idle'.
-      if (dmListProgress.status === 'running')
-        return send(res, 200, dmListProgress);
+      // Classifying needs a *fresh* profile photo (see gatherDmListCandidates
+      // for why the stored one doesn't work), which means a real Instagram
+      // visit — too slow/account-sensitive to do inline here, and it has to
+      // go through the same browser/account the scan queue uses rather than
+      // run concurrently with it. So this creates a small job (mode:
+      // 'dm-refresh', forceRescan on every candidate) and enqueues it on the
+      // normal 'scan' lane — run()'s existing visitPending() does the actual
+      // revisit, pacing, account rotation and resumability, with the
+      // genderGuess classification step bolted on (see there). The frontend
+      // polls the returned job's ordinary GET /api/jobs/:id instead of a
+      // bespoke status endpoint.
+      const inFlight = queue.tasks.find(
+        (t) =>
+          ['queued', 'running', 'stopping'].includes(t.status) &&
+          jobs.find((j) => j.id === t.jobId)?.mode === 'dm-refresh',
+      );
+      if (inFlight) return send(res, 200, { status: 'running', jobId: inFlight.jobId });
       const candidateSettings = settings();
       const { needsClassification } = gatherDmListCandidates(candidateSettings);
-      if (!needsClassification.length)
-        return send(res, 200, { status: 'idle', done: 0, total: 0, error: null });
+      const instagramOnly = needsClassification.filter(
+        ({ platform }) => platform === 'instagram',
+      );
+      if (!instagramOnly.length)
+        return send(res, 200, { status: 'idle', jobId: null });
       if (!candidateSettings.openaiKey)
         throw new Error('Bağlantılar bölümünde OpenAI API key ayarlayın.');
-      void runDmListClassification(needsClassification, candidateSettings);
-      return send(res, 200, dmListProgress);
+      const usernames = instagramOnly.map(({ row }) => row.username);
+      const jobId = randomUUID();
+      const job = {
+        id: jobId,
+        sources: usernames,
+        platform: 'instagram',
+        mode: 'dm-refresh',
+        forceRescan: usernames.map((u) => u.toLowerCase()),
+        limit: usernames.length,
+        model: null,
+        rows: [],
+        status: 'queued',
+        ownerId: user.id,
+        ownerName: user.name,
+        done: 0,
+        total: 0,
+        message: 'DM listesi için fotoğraflar tazeleniyor…',
+        warnings: [],
+        createdAt: new Date().toISOString(),
+        chainId: jobId,
+        chainGeneration: 1,
+      };
+      jobs.unshift(job);
+      try {
+        await save();
+        await queue.enqueue({
+          kind: 'scan',
+          jobId,
+          ownerId: user.id,
+          ownerName: user.name,
+          platform: 'instagram',
+          title: `DM listesi · ${usernames.length} fotoğraf tazeleme`,
+        });
+      } catch (e) {
+        jobs = jobs.filter((j) => j.id !== jobId);
+        await save();
+        throw e;
+      }
+      return send(res, 200, { status: 'running', jobId });
     }
-    if (req.method === 'GET' && route === '/api/dm-list/status')
-      return send(res, 200, dmListProgress);
     if (req.method === 'GET' && route === '/api/dm-list') {
       // DM outreach candidates across every scan ever run (not scoped to a
       // chosen set, unlike export-all) — no email on file (those go through
       // email outreach instead), follower count in the configured range,
-      // and a woman by AI photo guess. No reliable "is this a woman" field
-      // exists on an already-visited row otherwise — genderGuess is
-      // computed (normally via /start beforehand; see there) and cached on
-      // the row for every future call. Still handled inline here too as a
-      // fallback for anything that slipped through (e.g. a new scan
-      // finished between /start and this call) — usually a no-op.
+      // and a woman by AI photo guess (genderGuess — see
+      // gatherDmListCandidates for how that gets set; normally already done
+      // by /api/dm-list/start before this is ever called).
       const candidateSettings = settings();
-      const { candidates, needsClassification } =
-        gatherDmListCandidates(candidateSettings);
-      if (needsClassification.length && !candidateSettings.openaiKey)
-        throw new Error('Bağlantılar bölümünde OpenAI API key ayarlayın.');
-      if (needsClassification.length)
-        await runDmListClassification(needsClassification, candidateSettings);
+      const { candidates } = gatherDmListCandidates(candidateSettings);
       const selected = candidates.filter(
         ({ row }) => row.genderGuess === 'kadın',
       );

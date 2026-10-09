@@ -267,6 +267,7 @@ export function TeamWorkspace({
     });
   const [dmList, setDmList] = useState<{
     status: string;
+    jobId?: string;
     done: number;
     total: number;
     error: string | null;
@@ -283,17 +284,16 @@ export function TeamWorkspace({
       const res = await fetch('/api/dm-list/start', { method: 'POST' });
       const data = (await res.json()) as {
         status: string;
-        done: number;
-        total: number;
-        error: string | null;
+        jobId: string | null;
+        error?: string;
       };
       if (!res.ok) throw new Error(data.error || 'Başlatılamadı.');
-      if (data.status === 'idle') {
+      if (data.status === 'idle' || !data.jobId) {
         setDmList(null);
         triggerDmDownload();
         return;
       }
-      setDmList(data);
+      setDmList({ status: 'running', jobId: data.jobId, done: 0, total: 0, error: null });
     } catch (e) {
       setDmList({
         status: 'error',
@@ -303,36 +303,47 @@ export function TeamWorkspace({
       });
     }
   };
-  // Classification runs in the background (POST /api/dm-list/start) rather
-  // than inside the download request itself — a large first-time backlog
-  // can take minutes, long enough that the LAN gateway's idle timeout kills
-  // a single held-open connection. Polling here instead, then triggering
-  // the actual (now-fast, nothing left to classify) download once status
-  // goes back to 'idle'.
+  // Classifying needs a fresh Instagram visit per candidate now (see
+  // index.mjs's /api/dm-list/start for why), so it runs as an ordinary
+  // 'dm-refresh' scan job on the normal queue rather than inside the
+  // download request itself — polling this job the same way the main scan
+  // page would, then triggering the actual (now-fast, nothing left to
+  // classify) download once it's no longer queued/running.
   useEffect(() => {
-    if (dmList?.status !== 'running') return;
+    if (dmList?.status !== 'running' || !dmList.jobId) return;
     let live = true;
+    const jobId = dmList.jobId;
     const timer = setInterval(() => {
       void (async () => {
         try {
-          const res = await fetch('/api/dm-list/status');
-          const data = (await res.json()) as {
+          const res = await fetch(`/api/jobs/${jobId}`);
+          const job = (await res.json()) as {
             status: string;
             done: number;
             total: number;
-            error: string | null;
+            message: string;
           };
           if (!live) return;
-          if (data.error) {
-            setDmList({ ...data, status: 'error' });
+          if (!res.ok) {
+            setDmList({ status: 'error', done: 0, total: 0, error: 'İş bulunamadı.' });
             return;
           }
-          if (data.status === 'idle') {
-            setDmList(null);
-            triggerDmDownload();
+          if (['queued', 'running', 'stopping'].includes(job.status)) {
+            setDmList({
+              status: 'running',
+              jobId,
+              done: job.done,
+              total: job.total,
+              error: null,
+            });
             return;
           }
-          setDmList(data);
+          if (['failed', 'blocked'].includes(job.status)) {
+            setDmList({ status: 'error', done: 0, total: 0, error: job.message });
+            return;
+          }
+          setDmList(null);
+          triggerDmDownload();
         } catch {}
       })();
     }, 2000);
@@ -340,7 +351,7 @@ export function TeamWorkspace({
       live = false;
       clearInterval(timer);
     };
-  }, [dmList?.status]);
+  }, [dmList?.status, dmList?.jobId]);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetError, setSheetError] = useState('');

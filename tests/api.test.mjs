@@ -1159,7 +1159,7 @@ void test('marking a profile "Uygun aday" auto-chains a new following-mode scan 
   }
 });
 
-void test('GET /api/dm-list selects email-less in-range women across every job, skips already-downloaded ones on a repeat call, and refuses when classification is needed but no OpenAI key is set', async () => {
+void test('GET /api/dm-list selects email-less in-range women across every job (already classified), and skips already-downloaded ones on a repeat call', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-test-'));
   await mkdir(path.join(dir, '.local'));
   const row = (overrides) => ({
@@ -1287,7 +1287,7 @@ void test('GET /api/dm-list selects email-less in-range women across every job, 
   }
 });
 
-void test('GET /api/dm-list throws a clear error instead of a silent wrong result when a row needs AI classification but no OpenAI key is configured', async () => {
+void test('GET /api/dm-list silently excludes a row that has never been classified (genderGuess unset) instead of erroring — classification is /api/dm-list/start\'s job now, not this route\'s', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-nokey-test-'));
   await mkdir(path.join(dir, '.local'));
   const seeded = [
@@ -1384,9 +1384,14 @@ void test('GET /api/dm-list throws a clear error instead of a silent wrong resul
     cookie = relogin.headers.get('set-cookie').split(';')[0];
 
     const res = await get('/api/dm-list');
-    assert.notEqual(res.status, 200);
-    const data = await res.json();
-    assert.match(data.error, /OpenAI/);
+    assert.equal(res.status, 200, 'no OpenAI key needed — GET never classifies');
+    const book = new ExcelJS.Workbook();
+    await book.xlsx.load(Buffer.from(await res.arrayBuffer()));
+    assert.equal(
+      book.worksheets[0].rowCount,
+      1,
+      'header only — unclassified row excluded, not an error',
+    );
   } finally {
     child.kill('SIGTERM');
     await new Promise((resolve) => {
@@ -1807,17 +1812,160 @@ void test('POST /api/dm-list/start returns immediately (status: idle) when nothi
 
     // 'needsclassification' has no cached genderGuess and no OpenAI key is
     // configured in this fixture — /start must refuse up front rather than
-    // kicking off a background run doomed to fail silently.
+    // creating a 'dm-refresh' job doomed to fail on the first profile visit.
     const started = await post('/api/dm-list/start');
     assert.notEqual(started.status, 200);
     const startedBody = await started.json();
     assert.match(startedBody.error, /OpenAI/);
 
-    const status = await (await get('/api/dm-list/status')).json();
+    const jobsAfter = (await (await get('/api/jobs')).json());
     assert.equal(
-      status.status,
-      'idle',
-      'refused start must not leave a stale "running" status behind',
+      jobsAfter.some((j) => j.mode === 'dm-refresh'),
+      false,
+      'a refused start must not leave a dm-refresh job behind',
+    );
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+void test('POST /api/dm-list/start creates and queues a dm-refresh job (forceRescan on every candidate, Instagram-only) when classification is actually needed', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-job-test-'));
+  await mkdir(path.join(dir, '.local'));
+  await writeFile(
+    path.join(dir, '.local/settings.json'),
+    JSON.stringify({ openaiKey: 'test-key' }),
+  );
+  const seeded = [
+    {
+      id: 'ccccffff-9999-4111-8111-999999999999',
+      sources: ['src'],
+      mode: 'following',
+      platform: 'instagram',
+      limit: 100,
+      total: 2,
+      done: 2,
+      status: 'completed',
+      message: 'saved',
+      warnings: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      rows: [
+        {
+          username: 'needsclassification',
+          platform: 'instagram',
+          collectedAt: '2026-01-01T00:00:00Z',
+          email: null,
+          followers: 10000,
+          photoUrl: 'https://cdn.example/photo.jpg',
+        },
+        {
+          username: 'tiktokcandidate',
+          platform: 'tiktok',
+          collectedAt: '2026-01-01T00:00:00Z',
+          email: null,
+          followers: 10000,
+          photoUrl: 'https://cdn.example/photo.jpg',
+        },
+      ],
+    },
+  ];
+  await writeFile(path.join(dir, '.local/jobs.json'), JSON.stringify(seeded));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const get = (route) => fetch(base + route, { headers: { Cookie: cookie } });
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data ?? {}),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+
+    const started = await post('/api/dm-list/start');
+    assert.equal(started.status, 200);
+    const startedBody = await started.json();
+    assert.equal(startedBody.status, 'running');
+    assert.ok(startedBody.jobId);
+
+    const job = await (await get(`/api/jobs/${startedBody.jobId}`)).json();
+    assert.equal(job.mode, 'dm-refresh');
+    assert.deepEqual(
+      job.sources,
+      ['needsclassification'],
+      'only the Instagram candidate — tiktokcandidate is excluded, this feature is Instagram-only',
+    );
+    assert.deepEqual(job.forceRescan, ['needsclassification']);
+
+    // Calling /start again while this is still queued/running must not
+    // create a second dm-refresh job.
+    const second = await post('/api/dm-list/start');
+    const secondBody = await second.json();
+    assert.equal(secondBody.jobId, startedBody.jobId);
+    const allJobs = await (await get('/api/jobs')).json();
+    assert.equal(
+      allJobs.filter((j) => j.mode === 'dm-refresh').length,
+      1,
+      'still exactly one dm-refresh job, not a duplicate',
     );
   } finally {
     child.kill('SIGTERM');
