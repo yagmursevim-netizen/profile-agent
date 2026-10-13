@@ -1190,6 +1190,11 @@ void test('GET /api/dm-list selects email-less in-range women across every job (
         row({ username: 'hasemail', email: 'x@example.com' }),
         row({ username: 'toofew', followers: 100 }),
         row({ username: 'toomany', followers: 1_000_000 }),
+        // Otherwise fully qualifying — exists specifically to prove the
+        // dr/dyt/psk/av/prof exclusion (normally applied before a
+        // candidate is ever visited) also gets re-applied here, since a
+        // row can reach job.rows without it, e.g. via 'profiles' mode.
+        row({ username: 'drcandidate', fullName: 'Dr. Ayşe Yılmaz' }),
       ],
     },
   ];
@@ -1265,7 +1270,11 @@ void test('GET /api/dm-list selects email-less in-range women across every job (
     const firstBook = new ExcelJS.Workbook();
     await firstBook.xlsx.load(Buffer.from(await first.arrayBuffer()));
     const firstSheet = firstBook.worksheets[0];
-    assert.equal(firstSheet.rowCount, 2, 'header + exactly one qualifying row');
+    assert.equal(
+      firstSheet.rowCount,
+      2,
+      'header + exactly one qualifying row — drcandidate otherwise qualifies too, but "Dr." excludes her',
+    );
     assert.equal(firstSheet.getCell('A2').value.text, 'qualifiedwoman');
 
     const second = await get('/api/dm-list');
@@ -1967,6 +1976,138 @@ void test('POST /api/dm-list/start creates and queues a dm-refresh job (forceRes
       1,
       'still exactly one dm-refresh job, not a duplicate',
     );
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+void test('POST /api/outreach/add refuses a dr/dyt/psk/av/prof title-prefix row even if explicitly selected — a backstop for rows collected before run() started excluding them at visit time', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-outreach-title-test-'));
+  await mkdir(path.join(dir, '.local'));
+  const seeded = [
+    {
+      id: 'eeeeaaaa-3333-4111-8111-333333333333',
+      sources: ['src'],
+      mode: 'profiles',
+      platform: 'instagram',
+      limit: 100,
+      total: 2,
+      done: 2,
+      status: 'completed',
+      message: 'saved',
+      warnings: [],
+      createdAt: '2026-01-01T00:00:00Z',
+      rows: [
+        {
+          username: 'normaluser',
+          fullName: 'Ayşe Yılmaz',
+          platform: 'instagram',
+          collectedAt: '2026-01-01T00:00:00Z',
+          email: 'normaluser@example.com',
+          followers: 1000,
+          following: 100,
+          private: false,
+          bio: 'bio',
+        },
+        {
+          username: 'drcandidate',
+          fullName: 'Dr. Ayşe Yılmaz',
+          platform: 'instagram',
+          collectedAt: '2026-01-01T00:00:00Z',
+          email: 'drcandidate@example.com',
+          followers: 1000,
+          following: 100,
+          private: false,
+          bio: 'bio',
+        },
+      ],
+    },
+  ];
+  await writeFile(path.join(dir, '.local/jobs.json'), JSON.stringify(seeded));
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const get = (route) => fetch(base + route, { headers: { Cookie: cookie } });
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+
+    const jobId = seeded[0].id;
+    const res = await post('/api/outreach/add', {
+      jobId,
+      usernames: ['normaluser', 'drcandidate'],
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.added, 1, 'only normaluser added — drcandidate silently excluded');
+
+    const outreach = await (await get('/api/outreach')).json();
+    const usernames = outreach.contacts.map((c) => c.username);
+    assert.ok(usernames.includes('normaluser'));
+    assert.equal(usernames.includes('drcandidate'), false);
   } finally {
     child.kill('SIGTERM');
     await new Promise((resolve) => {

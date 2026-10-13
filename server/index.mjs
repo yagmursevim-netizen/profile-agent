@@ -310,12 +310,22 @@ function gatherDmListCandidates(candidateSettings) {
     }
   }
   const candidates = [...seen.values()].filter(
-    ({ row, platform }) =>
+    ({ row, job, platform }) =>
       !row.email &&
       typeof row.followers === 'number' &&
       row.followers >= candidateSettings.dmListMinFollowers &&
       row.followers <= candidateSettings.dmListMaxFollowers &&
-      !wasExportedToDmList(platform, row.username),
+      !wasExportedToDmList(platform, row.username) &&
+      // The dr/dyt/psk/av/prof title-prefix exclusion normally runs
+      // *before* a candidate is ever visited (screenAndAddCandidates, for
+      // 'following'/'candidates' mode scans) — but a row can still end up
+      // here unfiltered, e.g. from a 'profiles'-mode scan (a direct list,
+      // visited as submitted with no pre-visit filtering at all) or an
+      // older job predating this check. The DM list pulls from every row
+      // ever collected regardless of how it got there, so it has to re-
+      // apply the same filter itself rather than assume it was already
+      // applied upstream.
+      !titlePrefixFilterFor(job, candidateSettings).test(row.fullName || ''),
   );
   // Classifying off the row's stored photoUrl (captured whenever that
   // profile was originally visited, possibly weeks ago) used to silently
@@ -932,13 +942,41 @@ async function run(job, controller) {
           // doesn't look like a failed read or push the job into "partial".
           row.note = `${candidateSettings.fameFollowerThreshold.toLocaleString('tr-TR')}+ takipçili (ünlü olarak değerlendirildi).`;
         row.platform = platform;
+        // 'following'/'candidates' modes already filter dr/dyt/psk/av/prof
+        // title prefixes *before* ever visiting a candidate
+        // (screenAndAddCandidates, using hover/CSV-supplied fullName) —
+        // but that's not the only way a handle reaches this loop. 'profiles'
+        // mode (a directly submitted list) and 'dm-refresh' (a revisit of
+        // an already-collected row) have no such pre-visit name to check,
+        // so they visit first and only learn the real name here. Checking
+        // again with the now-real fullName, for every mode, is what
+        // guarantees a title-prefix match is never kept as a normal result
+        // regardless of which mode or path it came in through — it must
+        // never reach job.rows at all, since every export (DM list, "Profil
+        // listesi", email outreach via Outreach.add) reads straight from
+        // job.rows with no filter of its own.
+        const titleExcluded = titlePrefixFilterFor(job, candidateSettings).test(
+          row.fullName || '',
+        );
+        if (titleExcluded)
+          recordExcluded(
+            handle,
+            { fullName: row.fullName, photoUrl: row.photoUrl },
+            'Unvan öneki (ör. Dr.) içeren hesaplar dahil edilmiyor.',
+            'title',
+          );
         // DM list gender classification needs a *fresh* photo (see
         // gatherDmListCandidates) — forceRescan on this job guarantees this
         // visit just got one, so this is the first point it's actually
         // usable. Left unset (not cached as 'belirsiz') on failure/no photo
         // so a later dm-refresh run can retry rather than a transient
         // failure or a private/deleted account permanently poisoning it.
-        if (job.mode === 'dm-refresh' && row.photoUrl && candidateSettings.openaiKey) {
+        if (
+          !titleExcluded &&
+          job.mode === 'dm-refresh' &&
+          row.photoUrl &&
+          candidateSettings.openaiKey
+        ) {
           try {
             const screen = await screenPhoto(
               row.fullName,
@@ -952,7 +990,7 @@ async function run(job, controller) {
           }
         }
         job.rows = job.rows.filter((r) => r.username !== handle);
-        job.rows.push(row);
+        if (!titleExcluded) job.rows.push(row);
         job.done++;
         targets.delete(handle);
         job.remainingUsers = job.remainingUsers.filter((h) => h !== handle);
@@ -1806,7 +1844,17 @@ const server = http.createServer(async (req, res) => {
         if (!job) throw new Error('Tarama bulunamadı.');
         if (!Array.isArray(b.usernames) || !b.usernames.length)
           throw new Error('Listeye eklenecek hesapları seçin.');
-        const rows = job.rows.filter((r) => b.usernames.includes(r.username));
+        // Same dr/dyt/psk/av/prof guard run() now applies before a row can
+        // ever reach job.rows (see visitPending) — kept here too as a
+        // backstop for rows collected before that fix existed, so an old
+        // title-prefix match already sitting in some job's results still
+        // can't be added to outreach (email) manually either.
+        const titlePrefix = titlePrefixFilterFor(job, settings());
+        const rows = job.rows.filter(
+          (r) =>
+            b.usernames.includes(r.username) &&
+            !titlePrefix.test(r.fullName || ''),
+        );
         if (!rows.length) throw new Error('Seçilen hesaplar bulunamadı.');
         return send(res, 200, await outreach.add(rows, job.id, !!job.demo));
       }
