@@ -16,6 +16,7 @@ export function ConnectionSettings() {
     fameFollowerThreshold: 100000,
     minFollowerThreshold: 0,
     titlePrefixes: 'dr,dyt,psk,av,prof',
+    bioProfessionKeywords: 'doktor,avukat,psikolog,diyetisyen,profesör',
     excludedUsernames: '',
     genderExclude: 'erkek',
     autoAssess: false,
@@ -303,6 +304,22 @@ export function ConnectionSettings() {
         Görünen adı bu öneklerden biriyle (nokta veya boşlukla ayrılmış)
         başlayan hesaplar hiç değerlendirilmez. Örn. “Dr. Ayşe”, “Prof. Dr.
         Zeynep”.
+      </p>
+      <label htmlFor="bio-profession-keywords">
+        Bio’da aranacak meslek kelimeleri (virgülle ayrılmış)
+      </label>
+      <Input
+        id="bio-profession-keywords"
+        value={config.bioProfessionKeywords}
+        onChange={(e) =>
+          setConfig({ ...config, bioProfessionKeywords: e.target.value })
+        }
+        placeholder="doktor,avukat,psikolog,diyetisyen,profesör"
+      />
+      <p className="field-hint">
+        Görünen adında unvan öneki olmasa bile, bio metninde bu kelimelerden
+        biri geçen hesaplar da (ör. “avukatım”, “doktorum”) değerlendirmeye
+        alınmaz.
       </p>
       <label htmlFor="excluded-usernames">
         Hariç tutulacak kullanıcılar (virgül veya satır sonuyla ayrılmış)

@@ -1986,7 +1986,7 @@ void test('POST /api/dm-list/start creates and queues a dm-refresh job (forceRes
   }
 });
 
-void test('POST /api/outreach/add refuses a dr/dyt/psk/av/prof title-prefix row even if explicitly selected — a backstop for rows collected before run() started excluding them at visit time', async () => {
+void test('POST /api/outreach/add refuses a title-prefix name or a bio-declared profession even if explicitly selected — a backstop for rows collected before run() started excluding them at visit time', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'ig-outreach-title-test-'));
   await mkdir(path.join(dir, '.local'));
   const seeded = [
@@ -2024,6 +2024,20 @@ void test('POST /api/outreach/add refuses a dr/dyt/psk/av/prof title-prefix row 
           following: 100,
           private: false,
           bio: 'bio',
+        },
+        {
+          // Normal display name, no title prefix — only the bio text
+          // declares a profession. Proves bioProfessionFilterFor catches
+          // this independently of titlePrefixFilterFor (name-only).
+          username: 'bioonly',
+          fullName: 'Zeynep Kaya',
+          platform: 'instagram',
+          collectedAt: '2026-01-01T00:00:00Z',
+          email: 'bioonly@example.com',
+          followers: 1000,
+          following: 100,
+          private: false,
+          bio: 'Merhaba, ben avukatım. İstanbul.',
         },
       ],
     },
@@ -2098,16 +2112,21 @@ void test('POST /api/outreach/add refuses a dr/dyt/psk/av/prof title-prefix row 
     const jobId = seeded[0].id;
     const res = await post('/api/outreach/add', {
       jobId,
-      usernames: ['normaluser', 'drcandidate'],
+      usernames: ['normaluser', 'drcandidate', 'bioonly'],
     });
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.added, 1, 'only normaluser added — drcandidate silently excluded');
+    assert.equal(
+      body.added,
+      1,
+      'only normaluser added — drcandidate (name) and bioonly (bio text) both silently excluded',
+    );
 
     const outreach = await (await get('/api/outreach')).json();
     const usernames = outreach.contacts.map((c) => c.username);
     assert.ok(usernames.includes('normaluser'));
     assert.equal(usernames.includes('drcandidate'), false);
+    assert.equal(usernames.includes('bioonly'), false);
   } finally {
     child.kill('SIGTERM');
     await new Promise((resolve) => {

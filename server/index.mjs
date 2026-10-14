@@ -127,6 +127,25 @@ function titlePrefixFilterFor(job, candidateSettings) {
   if (job.market && job.market !== 'tr') return /(?!)/; // never matches
   return titlePrefixRegex(candidateSettings.titlePrefixes);
 }
+// Same professions, but matched as whole words anywhere in the bio text —
+// "avukatım"/"doktorum" written in a bio doesn't put the title in the
+// display name, so titlePrefixRegex (which only checks the start of a
+// name) would miss it. Only usable post-visit — bio text doesn't exist
+// before a full profile visit, unlike fullName (available from a
+// following-list hover card or a 'candidates'-mode CSV).
+function bioProfessionRegex(list) {
+  const words = String(list || '')
+    .split(',')
+    .map((w) => w.trim())
+    .filter(Boolean)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!words.length) return /(?!)/; // never matches
+  return new RegExp(`(^|[^\\p{L}])(${words.join('|')})`, 'iu');
+}
+function bioProfessionFilterFor(job, candidateSettings) {
+  if (job.market && job.market !== 'tr') return /(?!)/; // never matches
+  return bioProfessionRegex(candidateSettings.bioProfessionKeywords);
+}
 // Must stay in sync with the "Hedef pazar" dropdown in app/page.tsx — every
 // value it can send has to be accepted here. Only 'tr' has any behavioral
 // effect (see titlePrefixFilterFor above); the rest just record which
@@ -316,16 +335,14 @@ function gatherDmListCandidates(candidateSettings) {
       row.followers >= candidateSettings.dmListMinFollowers &&
       row.followers <= candidateSettings.dmListMaxFollowers &&
       !wasExportedToDmList(platform, row.username) &&
-      // The dr/dyt/psk/av/prof title-prefix exclusion normally runs
-      // *before* a candidate is ever visited (screenAndAddCandidates, for
-      // 'following'/'candidates' mode scans) — but a row can still end up
-      // here unfiltered, e.g. from a 'profiles'-mode scan (a direct list,
-      // visited as submitted with no pre-visit filtering at all) or an
-      // older job predating this check. The DM list pulls from every row
-      // ever collected regardless of how it got there, so it has to re-
-      // apply the same filter itself rather than assume it was already
-      // applied upstream.
-      !titlePrefixFilterFor(job, candidateSettings).test(row.fullName || ''),
+      // The dr/dyt/psk/av/prof title-prefix/bio-profession exclusion now
+      // runs on every visit regardless of mode (see visitPending) — this is
+      // just a backstop for rows collected before that fix existed. The DM
+      // list pulls from every row ever collected regardless of how it got
+      // there, so it has to re-apply the same filters itself rather than
+      // assume they were already applied upstream.
+      !titlePrefixFilterFor(job, candidateSettings).test(row.fullName || '') &&
+      !bioProfessionFilterFor(job, candidateSettings).test(row.bio || ''),
   );
   // Classifying off the row's stored photoUrl (captured whenever that
   // profile was originally visited, possibly weeks ago) used to silently
@@ -955,14 +972,20 @@ async function run(job, controller) {
         // never reach job.rows at all, since every export (DM list, "Profil
         // listesi", email outreach via Outreach.add) reads straight from
         // job.rows with no filter of its own.
-        const titleExcluded = titlePrefixFilterFor(job, candidateSettings).test(
+        const titleInName = titlePrefixFilterFor(job, candidateSettings).test(
           row.fullName || '',
         );
+        const titleInBio = bioProfessionFilterFor(job, candidateSettings).test(
+          row.bio || '',
+        );
+        const titleExcluded = titleInName || titleInBio;
         if (titleExcluded)
           recordExcluded(
             handle,
             { fullName: row.fullName, photoUrl: row.photoUrl },
-            'Unvan öneki (ör. Dr.) içeren hesaplar dahil edilmiyor.',
+            titleInName
+              ? 'Unvan öneki (ör. Dr.) içeren hesaplar dahil edilmiyor.'
+              : 'Bio\'da meslek beyanı (ör. doktor, avukat) içeren hesaplar dahil edilmiyor.',
             'title',
           );
         // DM list gender classification needs a *fresh* photo (see
@@ -1847,13 +1870,16 @@ const server = http.createServer(async (req, res) => {
         // Same dr/dyt/psk/av/prof guard run() now applies before a row can
         // ever reach job.rows (see visitPending) — kept here too as a
         // backstop for rows collected before that fix existed, so an old
-        // title-prefix match already sitting in some job's results still
-        // can't be added to outreach (email) manually either.
-        const titlePrefix = titlePrefixFilterFor(job, settings());
+        // title-prefix/bio-profession match already sitting in some job's
+        // results still can't be added to outreach (email) manually either.
+        const candidateSettings = settings();
+        const titlePrefix = titlePrefixFilterFor(job, candidateSettings);
+        const bioProfession = bioProfessionFilterFor(job, candidateSettings);
         const rows = job.rows.filter(
           (r) =>
             b.usernames.includes(r.username) &&
-            !titlePrefix.test(r.fullName || ''),
+            !titlePrefix.test(r.fullName || '') &&
+            !bioProfession.test(r.bio || ''),
         );
         if (!rows.length) throw new Error('Seçilen hesaplar bulunamadı.');
         return send(res, 200, await outreach.add(rows, job.id, !!job.demo));

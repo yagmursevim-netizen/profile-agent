@@ -35,6 +35,12 @@ export function settings() {
     fameFollowerThreshold: saved.fameFollowerThreshold ?? 100_000,
     minFollowerThreshold: saved.minFollowerThreshold ?? 0,
     titlePrefixes: saved.titlePrefixes || 'dr,dyt,psk,av,prof',
+    // Same professions as titlePrefixes, but matched as whole words
+    // anywhere in the bio text (not just a "Dr. " name prefix) — someone
+    // who writes "avukatım" or "doktorum" in their bio without using the
+    // title in their display name should be excluded the same way.
+    bioProfessionKeywords:
+      saved.bioProfessionKeywords || 'doktor,avukat,psikolog,diyetisyen,profesör',
     // Free-text roster (comma or newline separated) checked against every
     // scanned candidate right before a profile visit — see
     // excludedUsernameSet() in domain.mjs and its use in index.mjs's run().
@@ -99,6 +105,7 @@ export function publicSettings() {
     fameFollowerThreshold: s.fameFollowerThreshold,
     minFollowerThreshold: s.minFollowerThreshold,
     titlePrefixes: s.titlePrefixes,
+    bioProfessionKeywords: s.bioProfessionKeywords,
     excludedUsernames: s.excludedUsernames,
     genderExclude: s.genderExclude,
     autoAssess: s.autoAssess,
@@ -126,6 +133,7 @@ export async function updateSettings(input) {
     'fromEmail',
     'fromName',
     'titlePrefixes',
+    'bioProfessionKeywords',
   ]) {
     if (input[key] === undefined || input[key] === '') continue;
     if (
@@ -160,6 +168,13 @@ export async function updateSettings(input) {
   )
     throw new Error(
       'Ünvan önekleri virgülle ayrılmış harflerden oluşmalı (örn. dr,dyt,psk).',
+    );
+  if (
+    next.bioProfessionKeywords &&
+    !/^[a-zçğıöşü]+(,[a-zçğıöşü]+)*$/i.test(next.bioProfessionKeywords)
+  )
+    throw new Error(
+      'Bio meslek kelimeleri virgülle ayrılmış harflerden oluşmalı (örn. doktor,avukat).',
     );
   // Unlike the plain string fields above, this one is allowed to contain
   // newlines (one username per line is the natural way to paste a roster)
