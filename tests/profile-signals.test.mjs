@@ -70,6 +70,7 @@ void test('OpenAI assessment uses configured key and Responses schema without le
                 type: 'output_text',
                 text: JSON.stringify({
                   verdict: 'İncelenmeli',
+                  score: 50,
                   reason: 'İnsan incelemesi gerekir.',
                 }),
               },

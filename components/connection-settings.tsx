@@ -32,6 +32,7 @@ export function ConnectionSettings() {
     autoChainEnabled: false,
     dmListMinFollowers: 5000,
     dmListMaxFollowers: 20000,
+    dmListTopPercent: 10,
   });
   const [openaiKey, setOpenaiKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
@@ -257,11 +258,12 @@ export function ConnectionSettings() {
       </p>
       <h3>DM listesi</h3>
       <p>
-        Ekip → Dashboard’daki “DM listesi indir” taranmış tüm hesaplardan,
-        email’i olmayan ve bu takipçi aralığındaki kadın hesapları seçer
-        (fotoğraftan AI ile kadın/erkek tahmini yapılır, sonuç tekrar
-        kullanmak için kaydedilir). Daha önce indirilen hesaplar bir sonraki
-        indirmede tekrar gelmez.
+        “Excel olarak indir” çıktısına ayrı bir “DM Listesi” sayfası eklenir:
+        taranmış tüm hesaplardan, email’i olmayan, bu takipçi aralığındaki ve
+        AI değerlendirmesinde “Uygun aday” çıkan kadın hesaplardan (fotoğraftan
+        AI ile kadın/erkek tahmini yapılır, sonuç tekrar kullanmak için
+        kaydedilir) en yüksek puanlı yüzdesi seçilir. Daha önce indirilen
+        hesaplar bir sonraki indirmede tekrar gelmez.
       </p>
       <label htmlFor="dm-list-min">Alt takipçi sınırı</label>
       <Input
@@ -289,6 +291,26 @@ export function ConnectionSettings() {
           })
         }
       />
+      <label htmlFor="dm-list-top-percent">
+        En uygun yüzde kaçı DM listesine alınsın
+      </label>
+      <Input
+        id="dm-list-top-percent"
+        type="number"
+        min={1}
+        max={100}
+        value={config.dmListTopPercent}
+        onChange={(e) =>
+          setConfig({
+            ...config,
+            dmListTopPercent: Number(e.target.value) || 1,
+          })
+        }
+      />
+      <p className="field-hint">
+        “Uygun aday” çıkan kadın hesaplar arasından, AI puanına göre en
+        yüksekten sıralanıp yalnızca bu yüzdelik dilim DM listesine girer.
+      </p>
       <label htmlFor="title-prefixes">
         Elenecek unvan önekleri (virgülle ayrılmış)
       </label>

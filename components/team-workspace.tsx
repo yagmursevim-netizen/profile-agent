@@ -272,12 +272,6 @@ export function TeamWorkspace({
     total: number;
     error: string | null;
   } | null>(null);
-  const triggerDmDownload = () => {
-    const a = document.createElement('a');
-    a.href = '/api/dm-list';
-    a.download = 'hiwell-dm-listesi.xlsx';
-    a.click();
-  };
   const startDmList = async () => {
     setDmList({ status: 'starting', done: 0, total: 0, error: null });
     try {
@@ -289,8 +283,7 @@ export function TeamWorkspace({
       };
       if (!res.ok) throw new Error(data.error || 'Başlatılamadı.');
       if (data.status === 'idle' || !data.jobId) {
-        setDmList(null);
-        triggerDmDownload();
+        setDmList({ status: 'idle', done: 0, total: 0, error: null });
         return;
       }
       setDmList({ status: 'running', jobId: data.jobId, done: 0, total: 0, error: null });
@@ -305,10 +298,10 @@ export function TeamWorkspace({
   };
   // Classifying needs a fresh Instagram visit per candidate now (see
   // index.mjs's /api/dm-list/start for why), so it runs as an ordinary
-  // 'dm-refresh' scan job on the normal queue rather than inside the
-  // download request itself — polling this job the same way the main scan
-  // page would, then triggering the actual (now-fast, nothing left to
-  // classify) download once it's no longer queued/running.
+  // 'dm-refresh' scan job on the normal queue — polling this job the same
+  // way the main scan page would. This only classifies; the result shows up
+  // in the Dashboard's "Excel olarak indir" export's "DM Listesi" sheet, not
+  // as a download from here.
   useEffect(() => {
     if (dmList?.status !== 'running' || !dmList.jobId) return;
     let live = true;
@@ -342,8 +335,7 @@ export function TeamWorkspace({
             setDmList({ status: 'error', done: 0, total: 0, error: job.message });
             return;
           }
-          setDmList(null);
-          triggerDmDownload();
+          setDmList({ status: 'done', done: 0, total: 0, error: null });
         } catch {}
       })();
     }, 2000);
@@ -577,10 +569,12 @@ export function TeamWorkspace({
         <div className="panel sender-panel">
           <h3>DM listesi</h3>
           <p>
-            Email’i olmayan, Bağlantılar’da ayarlı takipçi aralığındaki kadın
-            hesapları (fotoğraftan AI ile belirlenir) tüm taramalardan
-            toplayıp indirir. Daha önce indirilen hesaplar bir sonraki
-            indirmede tekrar gelmez.
+            Email’i olmayan, Bağlantılar’da ayarlı takipçi aralığındaki ve AI
+            değerlendirmesinde “Uygun aday” çıkan hesapların fotoğrafını
+            yeniden ziyaret edip kadın/erkek sınıflandırmasını tazeler. Sonuç
+            ayrı bir dosya olarak inmez — Dashboard’daki “Excel olarak indir”
+            çıktısındaki “DM Listesi” sayfasında, en uygun yüzdelik dilim
+            olarak görünür.
           </p>
           <Button
             variant="outline"
@@ -591,8 +585,20 @@ export function TeamWorkspace({
               ? `Sınıflandırılıyor… (${dmList.done}/${dmList.total})`
               : dmList?.status === 'starting'
                 ? 'Başlatılıyor…'
-                : 'DM listesi indir'}
+                : 'DM adaylarını sınıflandır'}
           </Button>
+          {dmList?.status === 'done' && (
+            <p className="field-hint">
+              Sınıflandırma tamamlandı — sonuçlar bir sonraki “Excel olarak
+              indir” çıktısında yer alacak.
+            </p>
+          )}
+          {dmList?.status === 'idle' && (
+            <p className="field-hint">
+              Sınıflandırılacak yeni aday yok — mevcut sonuçlar zaten “Excel
+              olarak indir” çıktısında.
+            </p>
+          )}
           {dmList?.status === 'error' && (
             <p className="notice error" role="alert">
               {dmList.error}
@@ -606,9 +612,10 @@ export function TeamWorkspace({
           <p>
             Aşağıdan dışa aktarmak istediğin taramaları seç — profil linki,
             email bulunup bulunmadığı, DM ile ulaşım notu, AI değerlendirmesi
-            gibi tüm alanlar bir sayfada; elenen adaylar ayrı bir sayfada;
-            toplam sayılar bir özet sayfasında olacak şekilde tek Excel
-            dosyasında birleştirilir. Seçmeden indirilemez.
+            gibi tüm alanlar bir sayfada; elenen adaylar ayrı bir sayfada; en
+            uygun DM adayları ayrı bir sayfada; toplam sayılar bir özet
+            sayfasında olacak şekilde tek Excel dosyasında birleştirilir.
+            Seçmeden indirilemez.
           </p>
           <div className="bulk-toolbar">
             <Button

@@ -90,6 +90,10 @@ export function settings() {
     // ("Uygun" — see genderGuess) as a woman from their profile photo.
     dmListMinFollowers: saved.dmListMinFollowers ?? 5000,
     dmListMaxFollowers: saved.dmListMaxFollowers ?? 20000,
+    // Among "Uygun aday" candidates qualifying for the DM list, only the
+    // top this-percent by AI score actually makes the cut — keeps the list
+    // to the strongest matches instead of everyone who merely passed.
+    dmListTopPercent: saved.dmListTopPercent ?? 10,
   };
 }
 export function publicSettings() {
@@ -121,6 +125,7 @@ export function publicSettings() {
     autoChainEnabled: s.autoChainEnabled,
     dmListMinFollowers: s.dmListMinFollowers,
     dmListMaxFollowers: s.dmListMaxFollowers,
+    dmListTopPercent: s.dmListTopPercent,
   };
 }
 export async function updateSettings(input) {
@@ -291,6 +296,12 @@ export async function updateSettings(input) {
     (next.dmListMinFollowers ?? 5000) > (next.dmListMaxFollowers ?? 20000)
   )
     throw new Error('DM listesi alt sınırı üst sınırdan büyük olamaz.');
+  if (typeof input.dmListTopPercent !== 'undefined') {
+    const n = Number(input.dmListTopPercent);
+    if (!Number.isInteger(n) || n < 1 || n > 100)
+      throw new Error('DM listesi yüzdesi 1-100 arasında bir sayı olmalı.');
+    next.dmListTopPercent = n;
+  }
   queue = queue
     .catch(() => {})
     .then(async () => {

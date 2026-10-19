@@ -1159,7 +1159,7 @@ void test('marking a profile "Uygun aday" auto-chains a new following-mode scan 
   }
 });
 
-void test('GET /api/dm-list selects email-less in-range women across every job (already classified), and skips already-downloaded ones on a repeat call', async () => {
+void test('GET /api/export-all\'s "DM Listesi" sheet selects AI-vetted (Uygun aday), email-less, in-range women — excluding rejected/unassessed verdicts, unclassified gender, and title/bio matches — and skips already-included ones on a repeat call', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-test-'));
   await mkdir(path.join(dir, '.local'));
   const row = (overrides) => ({
@@ -1169,11 +1169,13 @@ void test('GET /api/dm-list selects email-less in-range women across every job (
     followers: 10000,
     photoUrl: 'https://cdn.example/photo.jpg',
     genderGuess: 'kadın',
+    ai: { verdict: 'Uygun aday', score: 80 },
     ...overrides,
   });
+  const jobId = 'ffffffff-1111-4111-8111-111111111111';
   const seeded = [
     {
-      id: 'ffffffff-1111-4111-8111-111111111111',
+      id: jobId,
       sources: ['src'],
       mode: 'following',
       platform: 'instagram',
@@ -1190,6 +1192,17 @@ void test('GET /api/dm-list selects email-less in-range women across every job (
         row({ username: 'hasemail', email: 'x@example.com' }),
         row({ username: 'toofew', followers: 100 }),
         row({ username: 'toomany', followers: 1_000_000 }),
+        // Never assessed at all — must not sneak in just because the other
+        // filters happen to pass.
+        row({ username: 'unassessed', ai: undefined }),
+        // Explicitly rejected by AI.
+        row({ username: 'rejected', ai: { verdict: 'Uygun değil', score: 5 } }),
+        // Needs human review — not an automatic yes.
+        row({ username: 'pendingreview', ai: { verdict: 'İncelenmeli', score: 50 } }),
+        // AI-vetted and otherwise in range, but never gender-classified —
+        // silently excluded, not an error (classification is
+        // /api/dm-list/start's job, not this route's).
+        row({ username: 'notgenderclassified', genderGuess: undefined }),
         // Otherwise fully qualifying — exists specifically to prove the
         // dr/dyt/psk/av/prof exclusion (normally applied before a
         // candidate is ever visited) also gets re-applied here, since a
@@ -1265,26 +1278,26 @@ void test('GET /api/dm-list selects email-less in-range women across every job (
     });
     cookie = relogin.headers.get('set-cookie').split(';')[0];
 
-    const first = await get('/api/dm-list');
+    const first = await get(`/api/export-all?jobIds=${jobId}`);
     assert.equal(first.status, 200);
     const firstBook = new ExcelJS.Workbook();
     await firstBook.xlsx.load(Buffer.from(await first.arrayBuffer()));
-    const firstSheet = firstBook.worksheets[0];
+    const firstSheet = firstBook.getWorksheet('DM Listesi');
     assert.equal(
       firstSheet.rowCount,
       2,
-      'header + exactly one qualifying row — drcandidate otherwise qualifies too, but "Dr." excludes her',
+      'header + exactly one qualifying row',
     );
     assert.equal(firstSheet.getCell('A2').value.text, 'qualifiedwoman');
 
-    const second = await get('/api/dm-list');
+    const second = await get(`/api/export-all?jobIds=${jobId}`);
     assert.equal(second.status, 200);
     const secondBook = new ExcelJS.Workbook();
     await secondBook.xlsx.load(Buffer.from(await second.arrayBuffer()));
     assert.equal(
-      secondBook.worksheets[0].rowCount,
+      secondBook.getWorksheet('DM Listesi').rowCount,
       1,
-      'qualifiedwoman already downloaded — header only this time',
+      'qualifiedwoman already exported to the DM list — header only this time',
     );
   } finally {
     child.kill('SIGTERM');
@@ -1296,32 +1309,38 @@ void test('GET /api/dm-list selects email-less in-range women across every job (
   }
 });
 
-void test('GET /api/dm-list silently excludes a row that has never been classified (genderGuess unset) instead of erroring — classification is /api/dm-list/start\'s job now, not this route\'s', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-nokey-test-'));
+void test('GET /api/export-all\'s "DM Listesi" sheet keeps only the top dmListTopPercent of qualifying candidates, ranked by AI score', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-top-percent-test-'));
   await mkdir(path.join(dir, '.local'));
+  const row = (username, score) => ({
+    username,
+    platform: 'instagram',
+    collectedAt: '2026-01-01T00:00:00Z',
+    email: null,
+    followers: 10000,
+    photoUrl: 'https://cdn.example/photo.jpg',
+    genderGuess: 'kadın',
+    ai: { verdict: 'Uygun aday', score },
+  });
+  const jobId = 'eeeeffff-1111-4111-8111-111111111111';
   const seeded = [
     {
-      id: 'aaaaffff-1111-4111-8111-111111111111',
+      id: jobId,
       sources: ['src'],
       mode: 'following',
       platform: 'instagram',
       limit: 100,
-      total: 1,
-      done: 1,
+      total: 4,
+      done: 4,
       status: 'completed',
       message: 'saved',
       warnings: [],
       createdAt: '2026-01-01T00:00:00Z',
       rows: [
-        {
-          username: 'unclassified',
-          platform: 'instagram',
-          collectedAt: '2026-01-01T00:00:00Z',
-          email: null,
-          followers: 10000,
-          photoUrl: 'https://cdn.example/photo.jpg',
-          // no genderGuess yet — needs a fresh AI call
-        },
+        row('candidateA', 90),
+        row('candidateB', 70),
+        row('candidateC', 50),
+        row('candidateD', 30),
       ],
     },
   ];
@@ -1392,15 +1411,23 @@ void test('GET /api/dm-list silently excludes a row that has never been classifi
     });
     cookie = relogin.headers.get('set-cookie').split(';')[0];
 
-    const res = await get('/api/dm-list');
-    assert.equal(res.status, 200, 'no OpenAI key needed — GET never classifies');
+    const settingsRes = await post('/api/settings', { dmListTopPercent: 50 });
+    assert.equal(settingsRes.status, 200);
+
+    const res = await get(`/api/export-all?jobIds=${jobId}`);
+    assert.equal(res.status, 200);
     const book = new ExcelJS.Workbook();
     await book.xlsx.load(Buffer.from(await res.arrayBuffer()));
+    const sheet = book.getWorksheet('DM Listesi');
     assert.equal(
-      book.worksheets[0].rowCount,
-      1,
-      'header only — unclassified row excluded, not an error',
+      sheet.rowCount,
+      3,
+      'header + top 2 of 4 (ceil(4 * 50%)), ranked by score',
     );
+    assert.equal(sheet.getCell('A2').value.text, 'candidateA');
+    assert.equal(sheet.getCell('H2').value, 90);
+    assert.equal(sheet.getCell('A3').value.text, 'candidateB');
+    assert.equal(sheet.getCell('H3').value, 70);
   } finally {
     child.kill('SIGTERM');
     await new Promise((resolve) => {
@@ -1740,6 +1767,7 @@ void test('POST /api/dm-list/start returns immediately (status: idle) when nothi
           followers: 10000,
           photoUrl: 'https://cdn.example/photo.jpg',
           genderGuess: 'kadın',
+          ai: { verdict: 'Uygun aday', score: 80 },
         },
         {
           username: 'needsclassification',
@@ -1748,6 +1776,7 @@ void test('POST /api/dm-list/start returns immediately (status: idle) when nothi
           email: null,
           followers: 10000,
           photoUrl: 'https://cdn.example/photo.jpg',
+          ai: { verdict: 'Uygun aday', score: 80 },
         },
       ],
     },
@@ -1871,6 +1900,7 @@ void test('POST /api/dm-list/start creates and queues a dm-refresh job (forceRes
           email: null,
           followers: 10000,
           photoUrl: 'https://cdn.example/photo.jpg',
+          ai: { verdict: 'Uygun aday', score: 80 },
         },
         {
           username: 'tiktokcandidate',
@@ -1879,6 +1909,7 @@ void test('POST /api/dm-list/start creates and queues a dm-refresh job (forceRes
           email: null,
           followers: 10000,
           photoUrl: 'https://cdn.example/photo.jpg',
+          ai: { verdict: 'Uygun aday', score: 80 },
         },
       ],
     },

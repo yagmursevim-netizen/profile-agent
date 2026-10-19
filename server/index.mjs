@@ -310,11 +310,16 @@ async function maybeContinueChain(job, candidateSettings) {
     console.error('Otomatik zincirleme taraması başlatılamadı:', e.message);
   }
 }
-// DM list (GET /api/dm-list) candidate gathering — shared by the route
-// itself and POST /api/dm-list/start's background classification pass.
-function gatherDmListCandidates(candidateSettings) {
+// DM list candidate gathering — shared by POST /api/dm-list/start's
+// background classification pass and /api/export-all's "DM Listesi" sheet.
+// `jobIds`, when given, scopes the pool to that export's selected scans
+// (export-all); omitted (POST /api/dm-list/start) it pulls from every
+// non-demo job ever run, since classification need is global, independent
+// of any one export selection.
+function gatherDmListCandidates(candidateSettings, jobIds = null) {
+  const scopedJobs = jobIds ? jobs.filter((j) => jobIds.includes(j.id)) : jobs;
   const seen = new Map();
-  for (const j of jobs) {
+  for (const j of scopedJobs) {
     if (j.demo) continue;
     for (const row of j.rows) {
       const platform = row.platform || j.platform || 'instagram';
@@ -335,6 +340,12 @@ function gatherDmListCandidates(candidateSettings) {
       row.followers >= candidateSettings.dmListMinFollowers &&
       row.followers <= candidateSettings.dmListMaxFollowers &&
       !wasExportedToDmList(platform, row.username) &&
+      // Only AI-vetted "Uygun aday" candidates qualify — an explicitly
+      // rejected or never-assessed profile shouldn't get a DM just because
+      // its follower count and lack of email happen to fit. Also spares
+      // gender photo-classification cost on candidates that would be
+      // excluded anyway (see needsClassification below).
+      row.ai?.verdict === 'Uygun aday' &&
       // The dr/dyt/psk/av/prof title-prefix/bio-profession exclusion now
       // runs on every visit regardless of mode (see visitPending) — this is
       // just a backstop for rows collected before that fix existed. The DM
@@ -358,6 +369,17 @@ function gatherDmListCandidates(candidateSettings) {
     ({ row }) => row.genderGuess == null,
   );
   return { candidates, needsClassification };
+}
+// Final DM-list cut: of the AI-vetted, in-range, email-less candidates,
+// keep only the ones classified as a woman from their photo, then rank by
+// AI suitability score and keep just the configured top percent — "en
+// uygun %X" rather than everyone who merely qualified.
+function selectTopDmListCandidates(candidates, candidateSettings) {
+  const women = candidates.filter(({ row }) => row.genderGuess === 'kadın');
+  const ranked = women.sort((a, b) => (b.row.ai?.score ?? 0) - (a.row.ai?.score ?? 0));
+  const topPercent = candidateSettings.dmListTopPercent ?? 10;
+  const count = Math.ceil((ranked.length * topPercent) / 100);
+  return ranked.slice(0, count);
 }
 function hasResumableWork(job) {
   if (job.remainingUsers?.length) return true;
@@ -2044,12 +2066,11 @@ const server = http.createServer(async (req, res) => {
       req.method === 'GET' &&
       (route === '/api/export-all' || route === '/api/export-rows')
     ) {
-      const { rows: allRows, excluded } = collectExportRows(
-        (url.searchParams.get('jobIds') || '')
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean),
-      );
+      const jobIds = (url.searchParams.get('jobIds') || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const { rows: allRows, excluded } = collectExportRows(jobIds);
       // Same "don't repeat an earlier download" log the single-job export
       // uses (markExportedForJob/wasExportedForJob — per job, not global),
       // so a username already pulled out via any of these export paths
@@ -2204,6 +2225,74 @@ const server = http.createServer(async (req, res) => {
       };
       for (const [key, count] of Object.entries(excludedByCategory))
         summary.addRow([`  · ${excludedCategoryLabels[key] || key}`, count]);
+      // The DM list used to be a separate download — now it's just another
+      // sheet in the same workbook, scoped to this export's selected scans
+      // and built from whatever's already classified (no inline AI photo
+      // classification here; that happens via POST /api/dm-list/start,
+      // which the Dashboard's DM panel triggers in the background).
+      if (route === '/api/export-all') {
+        const candidateSettings = settings();
+        const { candidates: dmCandidates } = gatherDmListCandidates(
+          candidateSettings,
+          jobIds,
+        );
+        const dmSelected = selectTopDmListCandidates(
+          dmCandidates,
+          candidateSettings,
+        );
+        const dmSheet = workbook.addWorksheet('DM Listesi', {
+          views: [{ state: 'frozen', ySplit: 1 }],
+        });
+        dmSheet.addRow([
+          'Kullanıcı adı',
+          'İsim',
+          'Takipçi',
+          'Platform',
+          'Bio',
+          'DM kanıtı',
+          'Dil',
+          'AI puanı',
+          'Kaynak',
+        ]);
+        dmSheet.columns.forEach(
+          (c, i) => (c.width = [22, 26, 12, 12, 65, 50, 14, 10, 30][i]),
+        );
+        for (const { row, job, platform } of dmSelected) {
+          const r = dmSheet.addRow([
+            row.username,
+            row.fullName || '',
+            row.followers ?? '',
+            platform === 'tiktok' ? 'TikTok' : 'Instagram',
+            row.bio || '',
+            row.dmEvidence || '',
+            row.language || 'Bilinmiyor',
+            row.ai?.score ?? '',
+            job.sources.join(', '),
+          ]);
+          r.getCell(1).value = {
+            text: row.username,
+            hyperlink: profileUrl(row.username, platform),
+          };
+          r.getCell(1).font = { color: { argb: 'FF146D62' }, underline: true };
+          r.alignment = { vertical: 'top', wrapText: true };
+        }
+        dmSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        dmSheet.getRow(1).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FF155B51' },
+        };
+        dmSheet.getRow(1).height = 28;
+        dmSheet.autoFilter = { from: 'A1', to: 'I1' };
+        const byPlatform = new Map();
+        for (const { row, platform } of dmSelected) {
+          if (!byPlatform.has(platform)) byPlatform.set(platform, []);
+          byPlatform.get(platform).push(row.username);
+        }
+        for (const [platform, usernames] of byPlatform)
+          await markExportedToDmList(platform, usernames);
+        summary.addRow(['DM listesine dahil edilen', dmSelected.length]);
+      }
       const file = await workbook.xlsx.writeBuffer();
       res.writeHead(200, {
         'Content-Type':
@@ -2252,7 +2341,9 @@ const server = http.createServer(async (req, res) => {
       // revisit, pacing, account rotation and resumability, with the
       // genderGuess classification step bolted on (see there). The frontend
       // polls the returned job's ordinary GET /api/jobs/:id instead of a
-      // bespoke status endpoint.
+      // bespoke status endpoint. This only classifies — it doesn't produce
+      // a download itself; classified rows show up in /api/export-all's
+      // "DM Listesi" sheet next time that's downloaded.
       const inFlight = queue.tasks.find(
         (t) =>
           ['queued', 'running', 'stopping'].includes(t.status) &&
@@ -2307,77 +2398,6 @@ const server = http.createServer(async (req, res) => {
         throw e;
       }
       return send(res, 200, { status: 'running', jobId });
-    }
-    if (req.method === 'GET' && route === '/api/dm-list') {
-      // DM outreach candidates across every scan ever run (not scoped to a
-      // chosen set, unlike export-all) — no email on file (those go through
-      // email outreach instead), follower count in the configured range,
-      // and a woman by AI photo guess (genderGuess — see
-      // gatherDmListCandidates for how that gets set; normally already done
-      // by /api/dm-list/start before this is ever called).
-      const candidateSettings = settings();
-      const { candidates } = gatherDmListCandidates(candidateSettings);
-      const selected = candidates.filter(
-        ({ row }) => row.genderGuess === 'kadın',
-      );
-      const workbook = new ExcelJS.Workbook();
-      const sheet = workbook.addWorksheet('DM listesi', {
-        views: [{ state: 'frozen', ySplit: 1 }],
-      });
-      sheet.addRow([
-        'Kullanıcı adı',
-        'İsim',
-        'Takipçi',
-        'Platform',
-        'Bio',
-        'DM kanıtı',
-        'Dil',
-        'Kaynak',
-      ]);
-      sheet.columns.forEach(
-        (c, i) => (c.width = [22, 26, 12, 12, 65, 50, 14, 30][i]),
-      );
-      for (const { row, job, platform } of selected) {
-        const r = sheet.addRow([
-          row.username,
-          row.fullName || '',
-          row.followers ?? '',
-          platform === 'tiktok' ? 'TikTok' : 'Instagram',
-          row.bio || '',
-          row.dmEvidence || '',
-          row.language || 'Bilinmiyor',
-          job.sources.join(', '),
-        ]);
-        r.getCell(1).value = {
-          text: row.username,
-          hyperlink: profileUrl(row.username, platform),
-        };
-        r.getCell(1).font = { color: { argb: 'FF146D62' }, underline: true };
-        r.alignment = { vertical: 'top', wrapText: true };
-      }
-      sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-      sheet.getRow(1).fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FF155B51' },
-      };
-      sheet.getRow(1).height = 28;
-      sheet.autoFilter = { from: 'A1', to: 'H1' };
-      const file = await workbook.xlsx.writeBuffer();
-      const byPlatform = new Map();
-      for (const { row, platform } of selected) {
-        if (!byPlatform.has(platform)) byPlatform.set(platform, []);
-        byPlatform.get(platform).push(row.username);
-      }
-      for (const [platform, usernames] of byPlatform)
-        await markExportedToDmList(platform, usernames);
-      res.writeHead(200, {
-        'Content-Type':
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'Content-Disposition': 'attachment; filename="hiwell-dm-listesi.xlsx"',
-      });
-      res.end(Buffer.from(file));
-      return;
     }
     if (req.method === 'POST' && route === '/api/demo') {
       if (active)
@@ -2789,6 +2809,11 @@ const server = http.createServer(async (req, res) => {
           if (!row) continue;
           row.ai = {
             verdict,
+            // No AI-generated score for a manual override — a human
+            // decision is as strong a signal as that gets, so this ranks
+            // at the extreme of whichever verdict was chosen (used to sort
+            // the DM list's "en uygun %X" — see gatherDmListCandidates).
+            score: verdict === 'Uygun aday' ? 100 : 0,
             reason: `Kullanıcı tarafından manuel olarak "${verdict}" işaretlendi.`,
             model: 'manual',
             assessedAt: new Date().toISOString(),
