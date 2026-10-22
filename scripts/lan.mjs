@@ -62,7 +62,10 @@ const env = {
   MINIFLARE_REGISTRY_PATH: '.wrangler/registry',
 };
 const children = [
-  spawn(process.execPath, ['server/index.mjs'], { env, stdio: 'inherit' }),
+  spawn(process.execPath, ['--max-old-space-size=4096', 'server/index.mjs'], {
+    env,
+    stdio: 'inherit',
+  }),
   spawn(
     process.execPath,
     [

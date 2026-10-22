@@ -1159,6 +1159,113 @@ void test('marking a profile "Uygun aday" auto-chains a new following-mode scan 
   }
 });
 
+void test('autopilot starts a chain scan on its own at boot from the top-scoring unused "Uygun aday" profiles across all past scans', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-autopilot-test-'));
+  await mkdir(path.join(dir, '.local'));
+  await writeFile(
+    path.join(dir, '.local/settings.json'),
+    JSON.stringify({ autoChainEnabled: true, autoChainBatchSize: 2 }),
+  );
+  const row = (username, verdict, score) => ({
+    username,
+    platform: 'instagram',
+    collectedAt: '2026-01-01T00:00:00Z',
+    ai: { verdict, score, reason: 'x' },
+  });
+  const job = (id, sources, rows, extra = {}) => ({
+    id,
+    sources,
+    sourcesDone: sources,
+    mode: 'following',
+    platform: 'instagram',
+    limit: 100,
+    total: rows.length,
+    done: rows.length,
+    status: 'completed',
+    message: 'saved',
+    warnings: [],
+    createdAt: '2026-01-01T00:00:00Z',
+    rows,
+    ownerId: 'owner-1',
+    ownerName: 'Owner One',
+    ...extra,
+  });
+  await writeFile(
+    path.join(dir, '.local/jobs.json'),
+    JSON.stringify([
+      job('aaaaaaaa-1111-4111-8111-111111111111', ['seedone'], [
+        row('mid', 'Uygun aday', 70),
+        row('rejected', 'Uygun değil', 99),
+      ]),
+      job(
+        'bbbbbbbb-2222-4111-8111-222222222222',
+        ['seedtwo'],
+        [row('top', 'Uygun aday', 95), row('low', 'Uygun aday', 40)],
+        { market: 'pt' },
+      ),
+      // 'usedalready' scores highest but was already a source — skipped.
+      job('cccccccc-3333-4111-8111-333333333333', ['usedalready'], [
+        row('usedalready', 'Uygun aday', 100),
+      ]),
+    ]),
+  );
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: { ...process.env, API_PORT: '0' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        if (/http:\/\/127.0.0.1:\d+/.test(String(c))) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let chained;
+    for (let i = 0; i < 50 && !chained; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      const saved = JSON.parse(
+        await readFile(path.join(dir, '.local/jobs.json'), 'utf8'),
+      );
+      chained = (Array.isArray(saved) ? saved : saved.jobs).filter(
+        (j) => j.chainGeneration === 2,
+      );
+      if (!chained.length) chained = undefined;
+    }
+    assert.ok(chained, 'a chain job was created with no user action');
+    assert.equal(chained.length, 1, 'only one scan started at a time');
+    assert.deepEqual(chained[0].sources, ['top', 'mid']);
+    assert.equal(chained[0].mode, 'following');
+    assert.equal(
+      chained[0].chainId,
+      'bbbbbbbb-2222-4111-8111-222222222222',
+      'lineage follows the best-scoring pick',
+    );
+    assert.equal(chained[0].market, 'pt');
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 void test('GET /api/export-all\'s "DM Listesi" sheet selects AI-vetted (Uygun aday), email-less, in-range women — excluding rejected/unassessed verdicts, unclassified gender, and title/bio matches — and skips already-included ones on a repeat call', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'ig-dm-list-test-'));
   await mkdir(path.join(dir, '.local'));

@@ -247,51 +247,80 @@ function collectExportRows(jobIds) {
   }
   return { rows: [...rowsByKey.values()], excluded: [...excludedByKey.values()] };
 }
-// The self-feeding discovery loop: whenever AI (or a human, via mark-verdict)
-// settles on "Uygun aday" for a scanned profile, that person's own following
-// list becomes the sources for a brand-new scan — called from run()'s
-// success path, reanalyze()'s completion and the mark-verdict route, i.e.
-// every place a row's verdict can become final. Off by default (Bağlantılar
-// → "Otomatik zincirleme taraması"), since this lets an unattended scan
-// spawn further unattended scans on its own.
+// The self-feeding discovery loop ("otopilot"): the highest-scoring
+// "Uygun aday" profiles found so far — across every scan, not just the one
+// that just finished — that have never been used as a source yet become the
+// sources for a new following-mode scan. Triggered from run()'s success
+// path, reanalyze()'s completion and the mark-verdict route (`job` = the job
+// whose verdicts just settled), and also by autopilotTimer below with no
+// job, so the loop restarts on its own after a server restart, a blocked or
+// failed scan, or verdicts that settled while the setting was off. Only
+// ever starts one scan at a time, and only while the scan lane is otherwise
+// idle — `job`'s own still-running task doesn't count, since run() calls
+// this before its task settles. Off by default (Bağlantılar → "Otomatik
+// zincirleme taraması"), since this lets the app spawn scans unattended.
 async function maybeContinueChain(job, candidateSettings) {
-  if (!candidateSettings.autoChainEnabled || job.demo) return;
-  const used = sourceUsernameSet(jobs, job.platform || 'instagram');
-  const seen = new Set();
-  const next = [];
-  for (const row of job.rows) {
-    if (row.ai?.verdict !== 'Uygun aday') continue;
-    const key = row.username.toLowerCase();
-    if (used.has(key) || seen.has(key)) continue;
-    seen.add(key);
-    next.push(row.username);
+  if (!candidateSettings.autoChainEnabled || job?.demo) return;
+  const platform = job?.platform || 'instagram';
+  const busy =
+    queue.tasks.some(
+      (t) =>
+        t.kind === 'scan' &&
+        t.jobId !== job?.id &&
+        ['queued', 'running', 'stopping'].includes(t.status),
+    ) ||
+    // A quota/restriction block clears on its own (autoResumeBlocked) —
+    // starting yet another scan meanwhile would just block the same way.
+    jobs.some(
+      (j) => !j.demo && j.status === 'blocked' && hasResumableWork(j),
+    );
+  if (busy) return;
+  const used = sourceUsernameSet(jobs, platform);
+  const best = new Map();
+  for (const j of jobs) {
+    if (j.demo || (j.platform || 'instagram') !== platform) continue;
+    for (const row of j.rows) {
+      if (row.ai?.verdict !== 'Uygun aday') continue;
+      const key = row.username.toLowerCase();
+      if (used.has(key)) continue;
+      const score = row.ai.score ?? 0;
+      const prior = best.get(key);
+      if (!prior || score > prior.score)
+        best.set(key, { username: row.username, score, job: j });
+    }
   }
+  const picked = [...best.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, candidateSettings.autoChainBatchSize ?? 5);
   // Nothing new to add a source for — the chain's natural stopping point,
   // not an error. No cap needed on the other end either: a username can
   // only ever be used as a source once, so growth tapers off on its own as
   // the local graph gets exhausted.
-  if (!next.length) return;
+  if (!picked.length) return;
+  // Lineage follows the best-scoring pick when there's no triggering job.
+  const parent = job ?? picked[0].job;
+  const next = picked.map((p) => p.username);
   const jobId = randomUUID();
   const child = {
     id: jobId,
     sources: next,
-    platform: job.platform || 'instagram',
+    platform,
     mode: 'following',
-    market: job.market,
+    market: parent.market,
     forceRescan: [],
-    limit: job.limit,
+    limit: parent.limit,
     model: null,
     rows: [],
     status: 'queued',
-    ownerId: job.ownerId,
-    ownerName: job.ownerName,
+    ownerId: parent.ownerId,
+    ownerName: parent.ownerName,
     done: 0,
     total: 0,
     message: 'Tarama hazırlanıyor…',
     warnings: [],
     createdAt: new Date().toISOString(),
-    chainId: job.chainId ?? job.id,
-    chainGeneration: (job.chainGeneration ?? 1) + 1,
+    chainId: parent.chainId ?? parent.id,
+    chainGeneration: (parent.chainGeneration ?? 1) + 1,
   };
   jobs.unshift(child);
   try {
@@ -299,9 +328,9 @@ async function maybeContinueChain(job, candidateSettings) {
     await queue.enqueue({
       kind: 'scan',
       jobId,
-      ownerId: job.ownerId,
-      ownerName: job.ownerName,
-      platform: child.platform,
+      ownerId: parent.ownerId,
+      ownerName: parent.ownerName,
+      platform,
       title: `Otomatik zincir · ${next.slice(0, 3).join(', ')}${next.length > 3 ? '…' : ''}`,
     });
   } catch (e) {
@@ -534,17 +563,30 @@ function pruneOldJobData() {
     delete job.candidates;
   }
 }
+// save() is called many times a second during a scan. Each call used to
+// serialize every job up front and queue that full snapshot behind the
+// previous write — once jobs.json reached tens of MB and the disk fell
+// behind, dozens of pending multi-MB strings piled up in memory until the
+// process hit Node's heap limit. Now at most one write waits behind the
+// running one, and it serializes when it actually starts, so every caller
+// still gets a write that includes its own changes.
 let saveQueue = Promise.resolve();
+let pendingSave = null;
 function save() {
   pruneOldJobData();
-  const json = JSON.stringify(jobs);
-  saveQueue = saveQueue
-    .catch(() => {})
-    .then(async () => {
-      await writeFile('.local/jobs.tmp', json, { mode: 0o600 });
-      await rename('.local/jobs.tmp', '.local/jobs.json');
-    });
-  return saveQueue;
+  if (!pendingSave) {
+    const write = saveQueue
+      .catch(() => {})
+      .then(async () => {
+        pendingSave = null;
+        const json = JSON.stringify(jobs);
+        await writeFile('.local/jobs.tmp', json, { mode: 0o600 });
+        await rename('.local/jobs.tmp', '.local/jobs.json');
+      });
+    pendingSave = write;
+    saveQueue = write;
+  }
+  return pendingSave;
 }
 await save();
 let active = null;
@@ -1530,6 +1572,14 @@ const autoResumeTimer = setInterval(
   60 * 60_000,
 );
 void autoResumeBlocked().catch(console.error);
+// Keeps the discovery loop going with nobody at the keyboard — see
+// maybeContinueChain(). A no-op while a scan is queued/running or the
+// setting is off.
+const autopilotTimer = setInterval(
+  () => void maybeContinueChain(null, settings()).catch(console.error),
+  5 * 60_000,
+);
+void maybeContinueChain(null, settings()).catch(console.error);
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -2920,6 +2970,7 @@ server.listen(port, '127.0.0.1', () =>
 async function shutdown() {
   clearInterval(queueTimer);
   clearInterval(autoResumeTimer);
+  clearInterval(autopilotTimer);
   queue.close();
   active?.controller.abort();
   await instagram.context?.close();

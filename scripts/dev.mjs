@@ -1,6 +1,10 @@
 import { spawn } from 'node:child_process';
 const children = [
-  spawn(process.execPath, ['server/index.mjs'], { stdio: 'inherit' }),
+  // Headroom above Node's default heap limit, which a large jobs.json
+  // can otherwise reach.
+  spawn(process.execPath, ['--max-old-space-size=4096', 'server/index.mjs'], {
+    stdio: 'inherit',
+  }),
   spawn(
     process.execPath,
     [

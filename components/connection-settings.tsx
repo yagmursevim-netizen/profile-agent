@@ -30,6 +30,7 @@ export function ConnectionSettings() {
     accountSwitchMinSources: 1,
     accountSwitchMaxSources: 2,
     autoChainEnabled: false,
+    autoChainBatchSize: 5,
     dmListMinFollowers: 5000,
     dmListMaxFollowers: 20000,
     dmListTopPercent: 10,
@@ -573,12 +574,14 @@ export function ConnectionSettings() {
       </p>
       <h3>Otomatik zincirleme taraması</h3>
       <p>
-        AI (ya da elle) bir profili “Uygun aday” olarak işaretlediğinde, o
-        kişinin takip ettiği hesaplar otomatik olarak yeni bir taramanın
-        kaynağı olur — kişiyi bulduk, şimdi onun takip listesini tarayalım.
-        Bir kullanıcı adı aynı taramada iki kez kaynak olarak kullanılmaz, bu
-        yüzden zincir doğal olarak tükenir; ayrıca bir sınır koymaya gerek
-        kalmaz.
+        Açıkken uygulama kendi kendine çalışır: şimdiye kadar bulunan
+        “Uygun aday” profiller arasından AI puanı en yüksek olanların takip
+        ettiği hesaplar yeni bir taramanın kaynağı olur, o taramada bulunan
+        en uygunlar da bir sonrakinin — böyle döngü devam eder. Sistem boşta
+        olduğunda (kuyrukta tarama yokken) her 5 dakikada bir ve sunucu
+        açılınca kendiliğinden yeni tarama başlatır. Bir kullanıcı adı yalnızca
+        bir kez kaynak olur; yeni uygun aday kalmayınca döngü kendiliğinden
+        durur.
       </p>
       <label htmlFor="auto-chain-enabled">
         <input
@@ -591,6 +594,22 @@ export function ConnectionSettings() {
         />{' '}
         Otomatik zincirleme taraması aktif
       </label>
+      <label htmlFor="auto-chain-batch-size">
+        Her turda kaç en uygun aday kaynak olsun
+      </label>
+      <Input
+        id="auto-chain-batch-size"
+        type="number"
+        min={1}
+        max={50}
+        value={config.autoChainBatchSize}
+        onChange={(e) =>
+          setConfig({
+            ...config,
+            autoChainBatchSize: Number(e.target.value) || 1,
+          })
+        }
+      />
       <p className="field-hint">
         Sunucu çökmesi veya Instagram/TikTok kısıtı oluştuğunda
         yagmur.sevim@hiwellapp.com ve ysevimyagmur@gmail.com adreslerine

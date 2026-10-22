@@ -85,6 +85,9 @@ export function settings() {
     // further unattended scans on its own is a meaningfully different
     // operating mode, worth an explicit opt-in rather than silently active.
     autoChainEnabled: saved.autoChainEnabled ?? false,
+    // How many of the top-scoring unused "Uygun aday" profiles one
+    // auto-chain scan takes as its sources.
+    autoChainBatchSize: saved.autoChainBatchSize ?? 5,
     // DM outreach list (see /api/dm-list in index.mjs): candidates with no
     // email on file, follower count in this range, and AI-classified
     // ("Uygun" — see genderGuess) as a woman from their profile photo.
@@ -123,6 +126,7 @@ export function publicSettings() {
     accountSwitchMinSources: s.accountSwitchMinSources,
     accountSwitchMaxSources: s.accountSwitchMaxSources,
     autoChainEnabled: s.autoChainEnabled,
+    autoChainBatchSize: s.autoChainBatchSize,
     dmListMinFollowers: s.dmListMinFollowers,
     dmListMaxFollowers: s.dmListMaxFollowers,
     dmListTopPercent: s.dmListTopPercent,
@@ -276,6 +280,12 @@ export async function updateSettings(input) {
     throw new Error('Rotasyon alt kaynak sınırı üst sınırdan büyük olamaz.');
   if (typeof input.autoChainEnabled !== 'undefined')
     next.autoChainEnabled = !!input.autoChainEnabled;
+  if (typeof input.autoChainBatchSize !== 'undefined') {
+    const n = Number(input.autoChainBatchSize);
+    if (!Number.isInteger(n) || n < 1 || n > 50)
+      throw new Error('Zincir başına kaynak sayısı 1-50 arasında olmalı.');
+    next.autoChainBatchSize = n;
+  }
   if (typeof input.dmListMinFollowers !== 'undefined') {
     const n = Number(input.dmListMinFollowers);
     if (!Number.isInteger(n) || n < 0 || n > 1_000_000_000)
