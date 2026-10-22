@@ -1061,6 +1061,36 @@ div[data-slot='table-container']:has(.profile-table) {
   background: #fbeaea;
   color: #8a2f2f;
 }
+.source-chip.removed {
+  background: #f2f1f6;
+  color: #a5a2b8;
+  text-decoration: line-through;
+}
+.source-chip-remove {
+  display: inline-flex;
+  opacity: 0;
+  margin-left: 4px;
+  padding: 1px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  vertical-align: -1px;
+  cursor: pointer;
+}
+.source-chip:hover .source-chip-remove,
+.source-chip-remove:focus-visible {
+  opacity: 1;
+}
+.source-chip-remove:hover {
+  background: rgb(0 0 0 / 0.1);
+}
+/* No hover on touch screens — keep the × visible there. */
+@media (hover: none) {
+  .source-chip-remove {
+    opacity: 1;
+  }
+}
 .job-state {
   display: flex;
   align-items: center;

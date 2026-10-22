@@ -114,6 +114,7 @@ type Job = {
   sources: string[];
   sourcesDone?: string[];
   sourcesFailed?: string[];
+  removedSources?: string[];
   sourceLists?: Record<string, { followers?: number | null }>;
   discoveredUsers?: string[];
   excludedCandidates?: Record<string, ExcludedCandidate>;
@@ -223,14 +224,46 @@ function Choice({
 // (see run()'s catch block — this is what keeps them retryable via "Devam
 // et"), so they have to be excluded here explicitly too, or a failure
 // would misreport itself as "Şu an" forever once the run moves past it.
-function SourceProgress({ job }: { job: Job }) {
+//
+// With onRemove (owner/admin), every chip but the one being read right now
+// shows an × on hover. Removing an upcoming source skips it; removing a
+// finished one also drops the profiles only it found from the results and
+// every export (see the remove-source route in index.mjs).
+function SourceProgress({
+  job,
+  onRemove,
+}: {
+  job: Job;
+  onRemove?: (source: string, wasDone: boolean) => void;
+}) {
+  const removed = new Set(job.removedSources ?? []);
   const done = new Set(job.sourcesDone ?? []);
   const failed = new Set(job.sourcesFailed ?? []);
-  const doneList = job.sources.filter((s) => done.has(s));
-  const failedList = job.sources.filter((s) => failed.has(s));
-  const remaining = job.sources.filter((s) => !done.has(s) && !failed.has(s));
+  const kept = job.sources.filter((s) => !removed.has(s));
+  const doneList = kept.filter((s) => done.has(s));
+  const failedList = kept.filter((s) => failed.has(s));
+  const remaining = kept.filter((s) => !done.has(s) && !failed.has(s));
   const [current, ...upcoming] = remaining;
+  const removedList = job.sources.filter((s) => removed.has(s));
   const followerCount = (s: string) => job.sourceLists?.[s]?.followers;
+  // The last remaining source can't be removed (see the route).
+  const removable = onRemove && kept.length > 1;
+  const chip = (s: string, kind: string, label: ReactNode = `@${s}`) => (
+    <span key={s} className={`source-chip ${kind}`}>
+      {label}
+      {removable && onRemove && (
+        <button
+          type="button"
+          className="source-chip-remove"
+          aria-label={`@${s} kaynağını çıkar`}
+          title="Çıkar"
+          onClick={() => onRemove(s, kind === 'done')}
+        >
+          <X size={10} />
+        </button>
+      )}
+    </span>
+  );
   return (
     <div className="source-progress">
       {doneList.length > 0 && (
@@ -238,13 +271,17 @@ function SourceProgress({ job }: { job: Job }) {
           <span className="source-group-label">
             Tamamlanan ({doneList.length})
           </span>
-          {doneList.map((s) => (
-            <span key={s} className="source-chip done">
-              @{s}
-              {typeof followerCount(s) === 'number' &&
-                ` (${followerCount(s)!.toLocaleString('tr-TR')} takipçi)`}
-            </span>
-          ))}
+          {doneList.map((s) =>
+            chip(
+              s,
+              'done',
+              <>
+                @{s}
+                {typeof followerCount(s) === 'number' &&
+                  ` (${followerCount(s)!.toLocaleString('tr-TR')} takipçi)`}
+              </>,
+            ),
+          )}
         </div>
       )}
       {current && (
@@ -256,11 +293,7 @@ function SourceProgress({ job }: { job: Job }) {
       {upcoming.length > 0 && (
         <div className="source-group">
           <span className="source-group-label">Sırada ({upcoming.length})</span>
-          {upcoming.map((s) => (
-            <span key={s} className="source-chip upcoming">
-              @{s}
-            </span>
-          ))}
+          {upcoming.map((s) => chip(s, 'upcoming'))}
         </div>
       )}
       {failedList.length > 0 && (
@@ -269,8 +302,16 @@ function SourceProgress({ job }: { job: Job }) {
             Hatalı ({failedList.length}) — &quot;Devam et&quot; ile tekrar
             denenir
           </span>
-          {failedList.map((s) => (
-            <span key={s} className="source-chip failed">
+          {failedList.map((s) => chip(s, 'failed'))}
+        </div>
+      )}
+      {removedList.length > 0 && (
+        <div className="source-group">
+          <span className="source-group-label">
+            Çıkarılan ({removedList.length})
+          </span>
+          {removedList.map((s) => (
+            <span key={s} className="source-chip removed">
               @{s}
             </span>
           ))}
@@ -1420,7 +1461,27 @@ function Workspace({
                     />
                   )}
                   {job.mode === 'following' && job.sources.length > 1 && (
-                    <SourceProgress job={job} />
+                    <SourceProgress
+                      job={job}
+                      onRemove={
+                        user.role === 'admin' || job.ownerId === user.id
+                          ? (source, wasDone) => {
+                              if (
+                                wasDone &&
+                                !confirm(
+                                  `@${source} çıkarılsın mı? Bu kaynaktan gelen profiller sonuçlardan ve indirilen dosyalardan da çıkarılır.`,
+                                )
+                              )
+                                return;
+                              void execute('remove-source', async () => {
+                                await api(`/jobs/${job.id}/remove-source`, {
+                                  source,
+                                });
+                              });
+                            }
+                          : undefined
+                      }
+                    />
                   )}
                 </div>
               )}

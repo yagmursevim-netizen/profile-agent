@@ -555,7 +555,7 @@ for (const testOrigin of [
     }
   });
 
-void test('save() prunes sourceLists/candidates from old non-active jobs at boot, keeps the 5 most recent, never touches active jobs, and always strips expired photo URLs', async () => {
+void test('save() prunes sourceLists candidate maps/candidates from old non-active jobs at boot, keeps the 5 most recent, never touches active jobs, and always strips expired photo URLs', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'ig-prune-test-'));
   await mkdir(path.join(dir, '.local'));
   const makeJob = (id, status) => ({
@@ -661,10 +661,10 @@ void test('save() prunes sourceLists/candidates from old non-active jobs at boot
       assert.ok(byId[id].candidates, `${id} should keep candidates`);
     }
     for (const id of ['old-6', 'old-7', 'old-8-resumable']) {
-      assert.equal(
+      assert.deepEqual(
         byId[id].sourceLists,
-        undefined,
-        `${id} should be pruned even though it's still resumable — resuming no longer depends on sourceLists surviving`,
+        { x: { users: ['a'] } },
+        `${id} should be pruned to plain username lists even though it's still resumable — resuming no longer depends on sourceLists surviving, and remove-source needs the lists`,
       );
       assert.equal(byId[id].candidates, undefined);
     }
@@ -1149,6 +1149,151 @@ void test('marking a profile "Uygun aday" auto-chains a new following-mode scan 
       1,
       'still exactly one child — no duplicate chain job from a repeat trigger',
     );
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+    });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+void test('POST /api/jobs/:id/remove-source skips an upcoming source and drops a finished source\'s profiles from results and exports, keeping ones a kept source also found', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ig-remove-source-test-'));
+  await mkdir(path.join(dir, '.local'));
+  const row = (username) => ({
+    username,
+    platform: 'instagram',
+    collectedAt: '2026-01-01T00:00:00Z',
+    ai: null,
+  });
+  const jobId = 'ffffffff-1111-4111-8111-111111111111';
+  await writeFile(
+    path.join(dir, '.local/jobs.json'),
+    JSON.stringify([
+      {
+        id: jobId,
+        sources: ['srca', 'srcb', 'srcc', 'srcd'],
+        sourcesDone: ['srca', 'srcb'],
+        sourceLists: {
+          srca: { users: ['onlya', 'Shared', 'pendinga', 'excludeda'] },
+          srcb: { users: ['shared', 'onlyb'] },
+        },
+        excludedCandidates: {
+          excludeda: { username: 'excludeda', reason: 'min-followers' },
+        },
+        remainingUsers: ['pendinga'],
+        mode: 'following',
+        platform: 'instagram',
+        limit: 100,
+        total: 4,
+        done: 3,
+        status: 'cancelled',
+        message: 'saved',
+        warnings: [],
+        createdAt: '2026-01-01T00:00:00Z',
+        rows: [row('onlya'), row('Shared'), row('onlyb')],
+      },
+    ]),
+  );
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../server/index.mjs', import.meta.url))],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        API_PORT: '0',
+        APP_LAN_ORIGIN: 'https://trilogy-punch-ion.ngrok-free.dev',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  try {
+    const base = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Server did not start')),
+        10000,
+      );
+      child.stdout.on('data', (c) => {
+        const m = String(c).match(/http:\/\/127.0.0.1:\d+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error('Server exited ' + code));
+      });
+    });
+    let cookie = '';
+    const get = (route) => fetch(base + route, { headers: { Cookie: cookie } });
+    const post = (route, data) =>
+      fetch(base + route, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://trilogy-punch-ion.ngrok-free.dev',
+          Cookie: cookie,
+        },
+        body: JSON.stringify(data),
+      });
+    const credentials = await readFile(
+      path.join(dir, '.local/ilk-giris.txt'),
+      'utf8',
+    );
+    const tempPassword = credentials
+      .split('\n')
+      .find((line) => line.includes('kullanıcı adı admin |'))
+      .split('geçici şifre ')[1];
+    const loginRes = await post('/api/auth/login', {
+      username: 'admin',
+      password: tempPassword,
+    });
+    cookie = loginRes.headers.get('set-cookie').split(';')[0];
+    await post('/api/auth/password', {
+      currentPassword: tempPassword,
+      password: 'Admin-new-pass-12345',
+    });
+    const relogin = await post('/api/auth/login', {
+      username: 'admin',
+      password: 'Admin-new-pass-12345',
+    });
+    cookie = relogin.headers.get('set-cookie').split(';')[0];
+    const route = `/api/jobs/${jobId}/remove-source`;
+
+    // Upcoming source: just skipped from now on.
+    assert.equal((await post(route, { source: 'srcc' })).status, 200);
+
+    // Finished source: profiles only it found leave the results.
+    const res = await post(route, { source: 'srca' });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).removed, 1, 'only onlya moves out');
+    const job = await (await get(`/api/jobs/${jobId}`)).json();
+    assert.deepEqual(job.removedSources, ['srcc', 'srca']);
+    assert.deepEqual(
+      job.rows.map((r) => r.username).sort(),
+      ['Shared', 'onlyb'],
+      'Shared stays — srcb (kept) found it too',
+    );
+    assert.deepEqual(job.remainingUsers, [], 'pendinga no longer pending');
+    assert.equal(job.excludedCandidates.excludeda, undefined);
+
+    const exported = await (await get(`/api/export-rows?jobIds=${jobId}`)).json();
+    assert.deepEqual(
+      exported.rows.map((r) => r.username).sort(),
+      ['Shared', 'onlyb'],
+    );
+
+    // srcb and srcd remain; removing srcb leaves only srcd, then srcd is
+    // the last one and refused.
+    assert.equal((await post(route, { source: 'srcb' })).status, 200);
+    const last = await post(route, { source: 'srcd' });
+    assert.equal(last.status, 400);
+    assert.match((await last.json()).error, /Son kaynak/);
+    assert.equal((await post(route, { source: 'nope' })).status, 400);
   } finally {
     child.kill('SIGTERM');
     await new Promise((resolve) => {

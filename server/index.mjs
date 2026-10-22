@@ -413,10 +413,24 @@ function selectTopDmListCandidates(candidates, candidateSettings) {
 function hasResumableWork(job) {
   if (job.remainingUsers?.length) return true;
   if (['following', 'search'].includes(job.mode)) {
-    const done = new Set(job.sourcesDone || []);
+    const done = new Set([
+      ...(job.sourcesDone || []),
+      ...(job.removedSources || []),
+    ]);
     return job.sources.some((s) => !done.has(s));
   }
   return false;
+}
+// Lowercased usernames a removed source turned up (see the remove-source
+// route) — skipped if still pending, and kept out of job.rows. Cached per
+// array identity since visitPending checks it for every handle and the
+// route always assigns a fresh array.
+const removedUserSets = new WeakMap();
+function removedUserSet(job) {
+  const list = job.removedUsers || [];
+  let set = removedUserSets.get(list);
+  if (!set) removedUserSets.set(list, (set = new Set(list)));
+  return set;
 }
 const port = Number(process.env.API_PORT || 4318);
 const lanOrigin = process.env.APP_LAN_ORIGIN || '';
@@ -559,7 +573,11 @@ function pruneOldJobData() {
     // got pruned, no matter how old — this is what let jobs.json grow to
     // 159MB in production despite individual jobs' row counts looking
     // completely ordinary.
-    delete job.sourceLists;
+    // Each source's plain username list survives (only the heavy per-
+    // candidate map goes) — remove-source needs it to know which profiles
+    // a source turned up, even on an old job.
+    if (job.sourceLists)
+      for (const list of Object.values(job.sourceLists)) delete list.candidates;
     delete job.candidates;
   }
 }
@@ -921,6 +939,14 @@ async function run(job, controller) {
     const visitPending = async () => {
       for (const handle of [...targets]) {
         signal.throwIfAborted();
+        if (removedUserSet(job).has(handle.toLowerCase())) {
+          targets.delete(handle);
+          job.remainingUsers = (job.remainingUsers || []).filter(
+            (h) => h !== handle,
+          );
+          job.total = job.done + targets.size;
+          continue;
+        }
         if (
           candidateSettings.restBreakEnabled &&
           Date.now() - lastBreakAt >=
@@ -1077,7 +1103,10 @@ async function run(job, controller) {
           }
         }
         job.rows = job.rows.filter((r) => r.username !== handle);
-        if (!titleExcluded) job.rows.push(row);
+        // Its source may have been removed while this profile was loading.
+        if (!titleExcluded && removedUserSet(job).has(handle.toLowerCase()))
+          (job.removedRows = job.removedRows || []).push(row);
+        else if (!titleExcluded) job.rows.push(row);
         job.done++;
         targets.delete(handle);
         job.remainingUsers = job.remainingUsers.filter((h) => h !== handle);
@@ -1117,6 +1146,9 @@ async function run(job, controller) {
     } else if (job.mode === 'following') {
       for (const source of job.sources) {
         if (sourcesDone.has(source)) continue;
+        // Read live, not snapshotted — remove-source can drop an upcoming
+        // source while this loop is running.
+        if (job.removedSources?.includes(source)) continue;
         if (job.skipRemainingDiscovery) break;
         signal.throwIfAborted();
         const rotatedTo = await maybeRotateAccountForSource();
@@ -1164,6 +1196,12 @@ async function run(job, controller) {
             );
           }
           job.sourceLists[source] = { ...result, requestedLimit: job.limit };
+          // Someone a removed source found is legitimately back in once a
+          // kept source finds them too.
+          if (job.removedUsers?.length) {
+            const found = new Set(result.users.map((u) => u.toLowerCase()));
+            job.removedUsers = job.removedUsers.filter((u) => !found.has(u));
+          }
           job.candidates = { ...job.candidates, ...result.candidates };
           await screenAndAddCandidates({
             users: result.users,
@@ -2655,7 +2693,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const match = route.match(
-      /^\/api\/jobs\/([a-f0-9-]+)(?:\/(stop|skip-discovery|export|analyze|usernames|rescreen-excluded|restore-excluded|mark-verdict))?$/,
+      /^\/api\/jobs\/([a-f0-9-]+)(?:\/(stop|skip-discovery|export|analyze|usernames|rescreen-excluded|restore-excluded|mark-verdict|remove-source))?$/,
     );
     if (match) {
       const job = jobs.find((j) => j.id === match[1]);
@@ -2737,6 +2775,65 @@ const server = http.createServer(async (req, res) => {
         job.skipRemainingDiscovery = true;
         await save();
         return send(res, 200, { ok: true });
+      }
+      // Drops one source from a following-mode scan, running or not. Not
+      // yet read: it's simply skipped. Already read: every profile only it
+      // turned up (not also found by a source that stays) leaves job.rows
+      // for job.removedRows and leaves the pending visit list, so no export,
+      // the DM list or the auto-chain ever sees it. The source currently
+      // being read can't be removed — its list read has no clean stopping
+      // point; "Kaynak taramayı bitir" or Durdur covers that.
+      if (req.method === 'POST' && match[2] === 'remove-source') {
+        if (user.role !== 'admin' && job.ownerId !== user.id)
+          return send(res, 403, {
+            error: 'Yalnızca iş sahibi veya admin bu işlemi yapabilir.',
+          });
+        const { source } = await body(req);
+        if (job.mode !== 'following' || !job.sources.includes(source))
+          throw new Error('Kaynak bu taramada bulunamadı.');
+        const removed = new Set(job.removedSources || []);
+        if (removed.has(source)) return send(res, 200, { ok: true, removed: 0 });
+        const done = new Set(job.sourcesDone || []);
+        const failed = new Set(job.sourcesFailed || []);
+        const current = job.sources.find(
+          (s) => !done.has(s) && !failed.has(s) && !removed.has(s),
+        );
+        if (['running', 'stopping'].includes(job.status) && source === current)
+          throw new Error('Şu an taranan kaynak çıkarılamaz.');
+        if (job.sources.filter((s) => !removed.has(s)).length <= 1)
+          throw new Error('Son kaynak çıkarılamaz; bunun yerine taramayı durdurun.');
+        let movedRows = 0;
+        if (done.has(source)) {
+          const list = job.sourceLists?.[source]?.users;
+          if (!list)
+            throw new Error(
+              'Bu kaynağın bulduğu hesapların listesi artık saklanmıyor; çıkarılamaz.',
+            );
+          const kept = new Set(
+            job.sources
+              .filter((s) => s !== source && !removed.has(s))
+              .flatMap((s) => job.sourceLists?.[s]?.users || [])
+              .map((u) => u.toLowerCase()),
+          );
+          const drop = new Set(
+            list.map((u) => u.toLowerCase()).filter((u) => !kept.has(u)),
+          );
+          job.removedUsers = [...new Set([...(job.removedUsers || []), ...drop])];
+          const leaving = job.rows.filter((r) => drop.has(r.username.toLowerCase()));
+          job.rows = job.rows.filter((r) => !drop.has(r.username.toLowerCase()));
+          job.removedRows = [...(job.removedRows || []), ...leaving];
+          movedRows = leaving.length;
+          for (const key of Object.keys(job.excludedCandidates || {}))
+            if (drop.has(key)) delete job.excludedCandidates[key];
+          job.remainingUsers = (job.remainingUsers || []).filter(
+            (h) => !drop.has(h.toLowerCase()),
+          );
+          job.total = job.done + job.remainingUsers.length;
+        }
+        job.removedSources = [...removed, source];
+        if (failed.delete(source)) job.sourcesFailed = [...failed];
+        await save();
+        return send(res, 200, { ok: true, removed: movedRows });
       }
       if (req.method === 'POST' && match[2] === 'analyze') {
         const b = await body(req);
