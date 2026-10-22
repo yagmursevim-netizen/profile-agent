@@ -50,6 +50,21 @@ type ExportRow = {
   sourceLabel: string;
   jobId?: string;
 };
+// When the local API is down or times out, the LAN/ngrok gateway answers
+// with a plain-text message instead of JSON — calling res.json() on that
+// surfaced only a cryptic parse error. This shows the gateway's own message
+// (or the HTTP status) instead.
+async function readJson<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      text.trim().slice(0, 200) ||
+        `Yerel servis yanıt vermedi (HTTP ${res.status}). Sunucunun çalıştığını kontrol edin.`,
+    );
+  }
+}
 const rowKey = (r: ExportRow) => `${r.platform || 'instagram'}:${r.username.toLowerCase()}`;
 // Mirrors server/domain.mjs's csvCell — same spreadsheet-formula-injection
 // neutralization, since this file also produces a CSV a spreadsheet app
@@ -276,11 +291,11 @@ export function TeamWorkspace({
     setDmList({ status: 'starting', done: 0, total: 0, error: null });
     try {
       const res = await fetch('/api/dm-list/start', { method: 'POST' });
-      const data = (await res.json()) as {
+      const data = await readJson<{
         status: string;
         jobId: string | null;
         error?: string;
-      };
+      }>(res);
       if (!res.ok) throw new Error(data.error || 'Başlatılamadı.');
       if (data.status === 'idle' || !data.jobId) {
         setDmList({ status: 'idle', done: 0, total: 0, error: null });
@@ -310,12 +325,12 @@ export function TeamWorkspace({
       void (async () => {
         try {
           const res = await fetch(`/api/jobs/${jobId}`);
-          const job = (await res.json()) as {
+          const job = await readJson<{
             status: string;
             done: number;
             total: number;
             message: string;
-          };
+          }>(res);
           if (!live) return;
           if (!res.ok) {
             setDmList({ status: 'error', done: 0, total: 0, error: 'İş bulunamadı.' });
@@ -373,8 +388,8 @@ export function TeamWorkspace({
       const res = await fetch(
         `/api/export-rows?jobIds=${exportJobIds.join(',')}`,
       );
-      if (!res.ok) throw new Error('Satırlar yüklenemedi.');
-      const data = (await res.json()) as { rows: ExportRow[] };
+      const data = await readJson<{ rows: ExportRow[]; error?: string }>(res);
+      if (!res.ok) throw new Error(data.error || 'Satırlar yüklenemedi.');
       setSheetRows(data.rows);
       setIncludedKeys(new Set(data.rows.map(rowKey)));
     } catch (e) {
@@ -939,7 +954,7 @@ export function TeamWorkspace({
                               );
                               if (!res.ok)
                                 throw new Error(
-                                  ((await res.json()) as { error: string })
+                                  (await readJson<{ error: string }>(res))
                                     .error,
                                 );
                             } catch (e) {
