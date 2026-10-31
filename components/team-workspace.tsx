@@ -193,6 +193,10 @@ export function TeamWorkspace({
   view?: 'log' | 'dashboard';
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [autopilot, setAutopilot] = useState<{
+    message: string;
+    at: string;
+  } | null>(null);
   const [rows, setRows] = useState<Metrics[]>([]);
   const [definitions, setDefinitions] = useState<string[]>([]);
   const [error, setError] = useState('');
@@ -212,6 +216,7 @@ export function TeamWorkspace({
               throw new Error('Rapor yüklenemedi; oturumunuzu kontrol edin.');
             return res.json() as Promise<{
               tasks: Task[];
+              autopilot: { message: string; at: string } | null;
               rows: Metrics[];
               definitions: string[];
             }>;
@@ -219,6 +224,7 @@ export function TeamWorkspace({
         );
         if (live) {
           setTasks(results[0].tasks);
+          setAutopilot(results[0].autopilot ?? null);
           setRows(results[1].rows);
           setDefinitions(results[1].definitions);
         }
@@ -290,7 +296,11 @@ export function TeamWorkspace({
   const startDmList = async () => {
     setDmList({ status: 'starting', done: 0, total: 0, error: null });
     try {
-      const res = await fetch('/api/dm-list/start', { method: 'POST' });
+      const res = await fetch('/api/dm-list/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
       const data = await readJson<{
         status: string;
         jobId: string | null;
@@ -526,6 +536,16 @@ export function TeamWorkspace({
           bekleyen · Email: {waiting.filter((t) => t.kind === 'email').length}{' '}
           bekleyen
         </p>
+        {autopilot && (
+          <p>
+            <strong>Otomatik zincir:</strong> {autopilot.message} (
+            {new Date(autopilot.at).toLocaleTimeString('tr-TR', {
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
+            )
+          </p>
+        )}
         <div className="bulk-toolbar">
           <Select value={person} onValueChange={(v) => setPerson(v || 'all')}>
             <SelectTrigger aria-label="Kullanıcı">

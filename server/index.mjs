@@ -259,22 +259,40 @@ function collectExportRows(jobIds) {
 // idle — `job`'s own still-running task doesn't count, since run() calls
 // this before its task settles. Off by default (Bağlantılar → "Otomatik
 // zincirleme taraması"), since this lets the app spawn scans unattended.
+// Why the loop last did or didn't start a scan — shown in the İş günlüğü
+// panel (GET /api/queue), since "it just stopped" is otherwise impossible
+// to diagnose from the UI.
+let autopilotStatus = null;
+const setAutopilotStatus = (message) => {
+  autopilotStatus = { message, at: new Date().toISOString() };
+};
 async function maybeContinueChain(job, candidateSettings) {
-  if (!candidateSettings.autoChainEnabled || job?.demo) return;
+  if (job?.demo) return;
+  if (!candidateSettings.autoChainEnabled)
+    return setAutopilotStatus(
+      'Kapalı — Bağlantılar → “Otomatik zincirleme taraması aktif” ile açılır.',
+    );
   const platform = job?.platform || 'instagram';
-  const busy =
+  if (
     queue.tasks.some(
       (t) =>
-        t.kind === 'scan' &&
+        queue.lane(t) === 'scan' &&
         t.jobId !== job?.id &&
         ['queued', 'running', 'stopping'].includes(t.status),
-    ) ||
-    // A quota/restriction block clears on its own (autoResumeBlocked) —
-    // starting yet another scan meanwhile would just block the same way.
-    jobs.some(
-      (j) => !j.demo && j.status === 'blocked' && hasResumableWork(j),
+    )
+  )
+    return setAutopilotStatus(
+      'Kuyrukta tarama/AI işi var; o bitince yeni tur başlayacak.',
     );
-  if (busy) return;
+  // A quota/restriction block clears on its own (autoResumeBlocked) —
+  // starting yet another scan meanwhile would just block the same way.
+  const blocked = jobs.find(
+    (j) => !j.demo && j.status === 'blocked' && hasResumableWork(j),
+  );
+  if (blocked)
+    return setAutopilotStatus(
+      `Engellenen bir tarama bekliyor (${blocked.message}). Saatlik otomatik devam onu çözünce yeni tur başlayacak.`,
+    );
   const used = sourceUsernameSet(jobs, platform);
   const best = new Map();
   for (const j of jobs) {
@@ -296,7 +314,21 @@ async function maybeContinueChain(job, candidateSettings) {
   // not an error. No cap needed on the other end either: a username can
   // only ever be used as a source once, so growth tapers off on its own as
   // the local graph gets exhausted.
-  if (!picked.length) return;
+  if (!picked.length) {
+    const unassessed = jobs
+      .filter((j) => !j.demo && (j.platform || 'instagram') === platform)
+      .reduce(
+        (n, j) => n + j.rows.filter((r) => !r.ai && !r.error && r.bio !== null).length,
+        0,
+      );
+    return setAutopilotStatus(
+      `Kaynak olarak kullanılmamış “Uygun aday” kalmadı; döngü durdu.${
+        unassessed
+          ? ` AI ile değerlendirilmemiş ${unassessed} profil var — değerlendirilirse yeni adaylar çıkabilir.`
+          : ''
+      }${candidateSettings.openaiKey ? '' : ' OpenAI API key ayarlı değil; zincir taramalarında AI değerlendirmesi yapılamıyor.'}`,
+    );
+  }
   // Lineage follows the best-scoring pick when there's no triggering job.
   const parent = job ?? picked[0].job;
   const next = picked.map((p) => p.username);
@@ -333,10 +365,12 @@ async function maybeContinueChain(job, candidateSettings) {
       platform,
       title: `Otomatik zincir · ${next.slice(0, 3).join(', ')}${next.length > 3 ? '…' : ''}`,
     });
+    setAutopilotStatus(`Yeni tur başlatıldı: ${next.map((u) => '@' + u).join(', ')}.`);
   } catch (e) {
     jobs = jobs.filter((j) => j.id !== jobId);
     await save();
     console.error('Otomatik zincirleme taraması başlatılamadı:', e.message);
+    setAutopilotStatus(`Yeni tur başlatılamadı: ${e.message}`);
   }
 }
 // DM list candidate gathering — shared by POST /api/dm-list/start's
@@ -999,9 +1033,16 @@ async function run(job, controller) {
               row.aiError = e.message;
             }
           } else if (
-            candidateSettings.autoAssess &&
-            (row.email || row.dmForCollaboration) &&
-            (job.autoAssessedCount || 0) < candidateSettings.autoAssessLimit
+            (job.autoAssessedCount || 0) < candidateSettings.autoAssessLimit &&
+            ((candidateSettings.autoAssess &&
+              (row.email || row.dmForCollaboration)) ||
+              // The auto-chain only feeds on AI verdicts — an unassessed
+              // chain scan would find no "Uygun aday" and end the loop.
+              (job.chainGeneration > 1 &&
+                candidateSettings.autoChainEnabled &&
+                candidateSettings.openaiKey &&
+                row.bio !== null &&
+                !row.error))
           ) {
             // Bağlantılar → "Otomatik AI değerlendirmesi": profiles with an
             // email or DM-collaboration signal get their suitability verdict
@@ -1758,6 +1799,7 @@ const server = http.createServer(async (req, res) => {
               ),
           };
         }),
+        autopilot: autopilotStatus,
       });
     if (
       req.method === 'POST' &&
