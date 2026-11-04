@@ -48,8 +48,12 @@ try {
   await available('127.0.0.1', 3000);
   await available(config.host, config.port);
 } catch (e) {
+  // EADDRNOTAVAIL isn't a busy port — the IP saved by lan:setup is no
+  // longer assigned to this Mac (DHCP handed it a new one).
   console.error(
-    `Port açılamadı (${e.code}). npm run dev veya eski npm run lan işlemini kendi Terminal penceresinde Ctrl+C ile durdurun.`,
+    e.code === 'EADDRNOTAVAIL'
+      ? `Kayıtlı ağ adresi (${config.host}) artık bu bilgisayarda yok; IP adresi değişmiş.\nnpm run lan:setup çalıştırıp (birden fazla adres bulunursa: npm run lan:setup -- --host YENI_IP) sonra tekrar npm run lan başlatın ve diğer bilgisayarlara yeni adresi verin.`
+      : `Port açılamadı (${e.code}). npm run dev veya eski npm run lan işlemini kendi Terminal penceresinde Ctrl+C ile durdurun.`,
   );
   process.exit(1);
 }
